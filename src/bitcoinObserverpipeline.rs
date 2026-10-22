@@ -1,3 +1,10 @@
+pub struct BitcoinObservationPipeline {
+    utxo: BitcoinUTXOCollector,
+    pub miner: Miner,
+    chain: ChainStateManager,
+    schedule: Option<BitcoinSchedule>,
+}
+
 impl BitcoinObservationPipeline {
     #[inline(always)]
     pub fn new(
