@@ -1,11 +1,8 @@
-use std::{
-    env,
-};
+use std::env;
 
 use bit_minner::{
-    CollectorRegistry,
+    BitcoinObservationPipeline,
     Miner,
-    PayloadType,
     RenderState,
 };
 
@@ -14,121 +11,58 @@ use qp_hd::{
     QP44Event,
 };
 
-
 fn main() {
+    let args = env::args().collect::<Vec<_>>();
 
-    let args =
-        env::args()
-            .collect::<Vec<_>>();
+    let activation = args
+        .get(1)
+        .expect("missing activation")
+        .parse::<u64>()
+        .expect("invalid activation");
 
-    let activation =
-        args.get(1)
-            .expect("missing activation")
-            .parse::<u64>()
-            .expect("invalid activation");
+    let substrate = args
+        .get(2)
+        .expect("missing substrate")
+        .as_str();
 
+    let mut pipeline = BitcoinObservationPipeline::new(
+        activation,
+        substrate,
+    )
+    .expect("failed to initialize Bitcoin observation pipeline");
 
-    let mut miner =
-        Miner::new(
-            activation,
-        );
+    let mut windows = Vec::new();
 
-
-    let mut windows =
-        Vec::new();
-
-
-    for clip in &miner.clips {
-
+    for clip in pipeline.miner().clips() {
         windows.push(
             RenderState::window(
                 clip.substrate.clone(),
-            )
+            ),
         );
     }
 
-
     loop {
-
         for window in &mut windows {
+            let substrate = window.substrate.as_str();
 
-            let substrate =
-                window.substrate.as_str();
+            let persisted = refresh(
+                &mut pipeline,
+                substrate,
+            );
 
-
-            let payload_type =
-                PayloadType::BitcoinUTXO;
-
-
-            let persisted =
-                refresh(
-                    &mut miner,
-                    substrate,
-                );
-
-
-            if let Ok(Some(finalized)) =
-                CollectorRegistry::dispatch(
-                    substrate,
-                    payload_type,
-                    persisted,
-                )
-            {
-
-                let packet =
-                    finalized.txid();
-
-
-                let (
-                    heritage,
-                    scale,
-                ) =
-                    finalized.frame();
-
-
-                let activation =
-                    heritage
-                        .state
-                        .activations();
-
-
-                let retained =
-                    heritage
-                        .state
-                        .retained_mass();
-
-
-                window.frames(
-                    heritage,
-                    scale,
-                );
-
-
-                println!(
-                    "| packet: {:?} | activation: {} | qp kg unit: {} |",
-                    packet,
-                    activation,
-                    retained,
-                );
-            }
+            let _ = persisted;
         }
     }
 }
 
-
 #[inline(always)]
 fn refresh(
-    miner: &mut Miner,
+    pipeline: &mut BitcoinObservationPipeline,
     substrate: &str,
 ) -> PersistedEvent {
+    let event: QP44Event = pipeline
+        .miner_mut()
+        .submit(substrate);
 
-    let event: QP44Event =
-        miner.submit(
-            substrate,
-        );
-
-
-    PersistedEvent::Transit(
-        event,
-    )
+    PersistedEvent::Transit(event)
 }
