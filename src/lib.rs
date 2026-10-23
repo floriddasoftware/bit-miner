@@ -33,6 +33,9 @@ pub mod render;
 #[path = "bitcoinObserverpipeline.rs"]
 pub mod bitcoin_observation_pipeline;
 
+#[path = "bitcoinutxocollector.rs"]
+pub mod bitcoinutxocollector;
+
 // --- Primary exports for qtm-api ---
 
 pub use bitcoin_observation_pipeline::BitcoinObservationPipeline;
