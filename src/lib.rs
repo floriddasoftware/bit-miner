@@ -18,8 +18,6 @@ pub mod bitcoinreceipt;
 #[path = "bitcoinpayload.rs"]
 pub mod bitcoinpayload;
 
-#[path = "bitcoinmine.rs"]
-pub mod bitcoinmine;
 
 #[path = "miner.rs"]
 pub mod miner;
