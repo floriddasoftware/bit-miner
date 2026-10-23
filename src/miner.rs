@@ -1,16 +1,10 @@
+use std::path::PathBuf;
+
 use qp_hd::{
-    commands::{
-        load_depth,
-        qtm_open_manifold_until,
-        substrate_root,
-    },
-    protocolvalue::Qtm,
+    commands::substrate_root,
     qp44::QP44Event,
 };
-use qtm_graph::graph::frame::Direction;
-
 use crate::{
-    bitcoinpayload::{BitcoinPayload, PayloadType},
     broadcast::Broadcaster,
     substrate::Substrate,
 };
@@ -45,7 +39,7 @@ impl Miner {
                 substrate: substrate.lab,
                 activation: substrate.activation,
             })
-            .collect::<Vec<_>>();
+            .collect();
 
         Self {
             clips,
@@ -66,67 +60,47 @@ impl Miner {
             .find(|clip| clip.substrate == substrate)
     }
 
-    #[inline]
-    fn payload_identifier(payload_type: PayloadType) -> &'static str {
-        match payload_type {
-            PayloadType::Payload => "bitcoin/payload",
-            PayloadType::Transaction => "bitcoin/transaction",
-            PayloadType::Address => "bitcoin/address",
-            PayloadType::Wallet => "bitcoin/wallet",
-            PayloadType::Mempool => "bitcoin/mempool",
-        }
-    }
-
-    #[inline]
+    #[inline(always)]
     pub fn submit(
         &mut self,
         substrate: &str,
-        payload: BitcoinPayload,
-    ) -> QP44Event {
-        let activation = self
-            .clip(substrate)
-            .unwrap_or_else(|| {
-                panic!("active clip not found: {}", substrate)
-            })
-            .activation;
+        realized: u128,
+    ) -> Result<PathBuf, std::io::Error> {
+        let clip = self.clip(substrate).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("active clip not found: {substrate}"),
+            )
+        })?;
 
         let root = substrate_root().join(substrate);
+        let events = root.join("events");
 
-        let opened = qtm_open_manifold_until(substrate, activation);
-        let manifold = opened.state;
-        let mut depth = load_depth(&root);
+        if !events.is_dir() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("event store not found: {}", events.display()),
+            ));
+        }
 
-        let mass = payload
-            .output_value_sat()
-            .unwrap_or_else(|| {
-                panic!(
-                    "BitcoinPayload output value overflow: {}",
-                    substrate
-                )
-            }) as u128;
+        let event_path = events.join(format!(
+            "event_{}_{}",
+            clip.activation,
+            realized,
+        ));
 
-        let identifier = Self::payload_identifier(payload.payload_type);
-        let position = depth.next_position();
-
-        depth.insert(
-            identifier,
-            position,
-            manifold.retain(mass, manifold.dimension()),
-        );
-
-        let heritage = Direction::exile(manifold);
-
-        let qtm = Qtm::commit(
-            &heritage.state,
-            heritage.transition.net_work,
-        );
+        if !event_path.exists() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!(
+                    "stored event not found: {}",
+                    event_path.display()
+                ),
+            ));
+        }
 
         self.submissions = self.submissions.saturating_add(1);
 
-        QP44Event {
-            heritage,
-            qtm,
-            depth,
-        }
+        Ok(event_path)
     }
 }
