@@ -26,7 +26,7 @@ pub mod bitcoinoutputqpinput;
 pub mod miner;
 
 #[path = "qpoutputsbitcoininput.rs"]
-pub mod = qpoutputsbitcoininput.rs
+pub mod = qpoutputsbitcoininput;
 
 #[path = "render.rs"]
 pub mod render;
