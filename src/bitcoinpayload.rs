@@ -1,15 +1,23 @@
+
 use bitcoin::{
-    absolute::LockTime, Address, Amount, ScriptBuf, Transaction, TxIn, TxOut, Txid, Version,
+    absolute::LockTime,
+    transaction::Version,
+    Address,
+    Amount,
+    ScriptBuf,
+    Transaction,
+    TxIn,
+    TxOut,
+    Txid,
     Witness,
 };
 use bitcoin::hashes::Hash;
-use qp_hd::{
-    protocolvalue::Qtm,
-    qp44::{Direction, Depth, QuantPerm, Retain},
-};
+use qtm_graph::graph::frame::{Depth, Direction};
+use quantom_value::{QuantPerm, Retain};
+use qp_hd::protocolvalue::Qtm;
 
-pub use crate::bitcoinoutputqpinput::BitcoinOutput;
-pub use crate::qpoutputsbitcoininput::BitcoinInput;
+use crate::bitcoinoutputqpinput::BitcoinOutput;
+use crate::qpoutputsbitcoininput::BitcoinInput;
 
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
