@@ -37,6 +37,9 @@ pub mod bitcoin_observation_pipeline;
 #[path = "bitcoinutxocollector.rs"]
 pub mod bitcoinutxocollector;
 
+#[path = "settlement.rs"]
+pub mod settlement;
+
 // --- Primary exports for qtm-api ---
 
 pub use bitcoin_observation_pipeline::BitcoinObservationPipeline;
