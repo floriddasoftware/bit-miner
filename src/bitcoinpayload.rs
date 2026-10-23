@@ -1,28 +1,16 @@
-**** — open this text file (same content as bitcoinpayload.rs).
-Full source (copy into bit-miner/src/bitcoinpayload.rs):
-//! Bitcoin payload assembly for observation / settlement.
-//!
-//! Input and output component types live in dedicated modules:
-//! - [`BitcoinInput`] ← `qpoutputsbitcoininput.rs`
-//! - [`BitcoinOutput`] ← `bitcoinoutputqpinput.rs`
-//!
-//! Structural fee / replay mass use each component's `PayloadComponent::deep`
-//! path (QP), not the Bitcoin network miner fee.
-
 use bitcoin::{
     absolute::LockTime, Address, Amount, ScriptBuf, Transaction, TxIn, TxOut, Txid, Version,
     Witness,
 };
+use bitcoin::hashes::Hash;
+use qp_hd::{
+    protocolvalue::Qtm,
+    qp44::{Direction, Depth, QuantPerm, Retain},
+};
 
-// Component types from the QP input/output modules.
 pub use crate::bitcoinoutputqpinput::BitcoinOutput;
 pub use crate::qpoutputsbitcoininput::BitcoinInput;
 
-use crate::payload_component::PayloadComponent;
-use qp_hd::protocolvalue::Qtm;
-use qp_hd::qp44::QuantPerm;
-
-/// Discriminator for how a payload was assembled.
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum PayloadType {
@@ -33,24 +21,49 @@ pub enum PayloadType {
     Mempool = 4,
 }
 
+pub trait PayloadComponent: std::fmt::Debug + Send + Sync {
+    fn retained(&self, manifold: &QuantPerm) -> Retain;
+
+    #[inline(always)]
+    fn deep(
+        &self,
+        manifold: &QuantPerm,
+        identifier: impl Into<String>,
+        position: usize,
+    ) -> Retain {
+        let mut depth = Depth::new("qp/payload");
+        depth.insert(identifier, position, self.retained(manifold));
+        Direction::realize_depth(manifold, &depth)
+    }
+
+    #[inline(always)]
+    fn mass(
+        &self,
+        manifold: &QuantPerm,
+        identifier: impl Into<String>,
+        position: usize,
+    ) -> u128 {
+        self.deep(manifold, identifier, position).mass
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct BitcoinWallet {
-    pub addresses: Vec,
-    pub transactions: Vec,
+    pub addresses: Vec<String>,
+    pub transactions: Vec<Transaction>,
 }
 
 #[derive(Clone, Debug, Default)]
 pub struct BitcoinMempool {
-    pub transactions: Vec,
+    pub transactions: Vec<Transaction>,
 }
 
-/// Aggregated Bitcoin payload: txid + ordered input/output components.
 #[repr(C)]
 #[derive(Clone, Debug)]
 pub struct BitcoinPayload {
     pub txid: Txid,
-    pub inputs: Vec,
-    pub outputs: Vec,
+    pub inputs: Vec<BitcoinInput>,
+    pub outputs: Vec<BitcoinOutput>,
     pub payload_type: PayloadType,
 }
 
@@ -58,8 +71,8 @@ impl BitcoinPayload {
     #[inline(always)]
     pub fn new(
         txid: Txid,
-        inputs: Vec,
-        outputs: Vec,
+        inputs: Vec<BitcoinInput>,
+        outputs: Vec<BitcoinOutput>,
     ) -> Self {
         Self {
             txid,
@@ -131,7 +144,6 @@ impl BitcoinPayload {
         }
     }
 
-    /// Rebuild a `bitcoin::Transaction` from the component vectors.
     #[inline]
     pub fn transaction(&self, version: Version, lock_time: LockTime) -> Transaction {
         Transaction {
@@ -169,7 +181,7 @@ impl BitcoinPayload {
     }
 
     #[inline]
-    pub fn output_value_sat(&self) -> Option {
+    pub fn output_value_sat(&self) -> Option<u64> {
         self.outputs
             .iter()
             .try_fold(0u64, |sum, output| sum.checked_add(output.value))
@@ -185,41 +197,17 @@ impl BitcoinPayload {
         self.inputs.get(index)
     }
 
-    //
-    // Canonical QP structural fee.
-    //
-    // This is NOT the Bitcoin miner fee.
-    //
-    // The complete structural replay mass is delegated through each
-    // component's own deep() implementation:
-    //
-    //     component
-    //         ↓
-    //       Depth
-    //         ↓
-    // Direction::realize_depth()
-    //         ↓
-    //       Retain
-    //
-    // The fee is one percent of that canonical replay mass.
-    //
     #[inline(always)]
     pub fn fee_mass(&self, manifold: &QuantPerm) -> u128 {
         self.replay_mass(manifold) / 100
     }
 
-    //
-    // Canonical replay cost.
-    //
-    // Each BitcoinInput and BitcoinOutput realizes its own structure via deep().
-    // The payload only establishes deterministic component ordering.
-    //
     #[inline(always)]
     pub fn replay_mass(&self, manifold: &QuantPerm) -> u128 {
         let coordinate = Qtm::derive_coordinate(manifold);
         let script = derive_structural_script(&coordinate);
 
-        let input_mass: u128 = self
+        let input_mass = self
             .inputs
             .iter()
             .enumerate()
@@ -232,11 +220,11 @@ impl BitcoinPayload {
                 };
                 shaped.deep(manifold, "input", position).mass
             })
-            .sum();
+            .fold(0u128, u128::saturating_add);
 
         let output_offset = self.inputs.len();
 
-        let output_mass: u128 = self
+        let output_mass = self
             .outputs
             .iter()
             .enumerate()
@@ -250,11 +238,8 @@ impl BitcoinPayload {
                     .deep(manifold, "output", output_offset + position)
                     .mass
             })
-            .sum();
+            .fold(0u128, u128::saturating_add);
 
         input_mass.saturating_add(output_mass)
     }
 }
-
-
- 
