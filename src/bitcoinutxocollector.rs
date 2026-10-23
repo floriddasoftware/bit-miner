@@ -1,7 +1,4 @@
-pub struct BitcoinUTXOCollector;
-
 impl BitcoinUTXOCollector {
-
     #[inline(always)]
     pub fn new() -> Self {
         Self
@@ -17,12 +14,9 @@ impl BitcoinUTXOCollector {
     where
         F: FnMut(u128) -> EventReceipt,
     {
-
-        let mut pending =
-            Vec::new();
+        let mut pending = Vec::new();
 
         for observed in transactions {
-
             println!(
                 "[UTXO] substrate={} txid={} outputs={}",
                 substrate,
@@ -30,56 +24,32 @@ impl BitcoinUTXOCollector {
                 observed.outputs.len(),
             );
 
-            for output in &observed.outputs {
-
-                let utxo =
-                    BitcoinUTXO {
-
-                        outpoint:
-                            bitcoin::OutPoint {
-                                txid: observed.txid,
-                                vout: output.vout,
-                            },
-
-                        value:
-                            output.value,
-
-                        confirmations:
-                            0,
-
-                        coinbase:
-                            false,
-
-                        script_pubkey:
-                            output
-                                .script_pubkey
-                                .clone(),
-
-                        state:
-                            UTXOState::Unspent,
-                    };
+            for (position, output) in observed.outputs.iter().enumerate() {
+                let utxo = BitcoinUTXO {
+                    outpoint: bitcoin::OutPoint {
+                        txid: observed.txid,
+                        vout: output.vout,
+                    },
+                    value: output.value,
+                    confirmations: 0,
+                    coinbase: false,
+                    script_pubkey: output.script_pubkey.clone(),
+                    state: UTXOState::Unspent,
+                };
 
                 let Payload {
                     realized,
                     bitcoin,
                     ..
-                } =
-                    utxo.payload();
+                } = utxo.payload();
 
-                let receipt =
-                    submit(
-                        realized,
-                    );
+                let receipt = submit(realized);
 
-                pending.push(
-
-                    PendingQPEvent {
-
-                        receipt,
-
-                        bitcoin,
-                    }
-                );
+                pending.push(PendingQPEvent {
+                    receipt,
+                    bitcoin,
+                    position,
+                });
             }
         }
 
