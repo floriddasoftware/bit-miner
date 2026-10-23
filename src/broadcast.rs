@@ -9,7 +9,7 @@ use std::{
     thread,
     time::Duration,
 };
-
+use crate::bitcoinreceipt::SettlementReceipt;
 use bitcoin::{
     hashes::Hash,
     OutPoint,
