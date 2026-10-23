@@ -1,3 +1,5 @@
+use quantom_value::{Quantperm, Retain}
+
 #[repr(C)]
 #[derive(Clone, Debug)]
 pub struct BitcoinInput {
