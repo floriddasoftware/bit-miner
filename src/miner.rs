@@ -1,13 +1,8 @@
 use std::path::PathBuf;
 
-use qp_hd::{
-    commands::substrate_root,
+use qp_hd::commands::substrate_root;
 
-};
-use crate::{
-    broadcast::Broadcaster,
-    substrate::Substrate,
-};
+use crate::broadcast::Broadcaster;
 
 pub struct ActiveClip {
     pub substrate: String,
