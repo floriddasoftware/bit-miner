@@ -22,8 +22,6 @@ pub mod bitcoinpayload;
 #[path = "miner.rs"]
 pub mod miner;
 
-#[path = "bitcoindispatch.rs"]
-pub mod bitcoindispatch;
 
 #[path = "render.rs"]
 pub mod render;
