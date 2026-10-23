@@ -1,3 +1,12 @@
+use bitcoin::BlockHash;
+use qp_hd::qp44::Retain;
+
+use crate::{
+    bitcoinpayload::BitcoinPayload,
+    bitcoinutxocollector::BitcoinUTXOCollector,
+    miner::Miner,
+};
+
 pub struct BitcoinObservationPipeline {
     utxo: BitcoinUTXOCollector,
     pub miner: Miner,
