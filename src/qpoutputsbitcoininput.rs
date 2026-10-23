@@ -1,4 +1,9 @@
-use quantom_value::{Quantperm, Retain}
+use bitcoin::hashes::Hash;
+use quantom_value::{QuantPerm, Retain};
+use qp_hd::protocolvalue::Qtm;
+use qtm_graph::graph::frame::{Depth, Direction};
+
+use crate::bitcoinpayload::PayloadComponent;
 
 #[repr(C)]
 #[derive(Clone, Debug)]
