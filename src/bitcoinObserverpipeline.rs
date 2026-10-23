@@ -6,6 +6,7 @@ use crate::{
     bitcoinpayload::BitcoinPayload,
     miner::Miner,
     broadcast::FinalizedSettlement,
+    bitcoionutxocollector::BitcoinUTXOCollector,
 };
 
 
