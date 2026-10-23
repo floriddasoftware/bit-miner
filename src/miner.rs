@@ -1,6 +1,45 @@
-pub Struct Miner{ substrate, activation}
-use crate::broadcast::WirePacket;
-Impl Miner
+pub struct ActiveClip {
+    pub substrate: String,
+    pub activation: u64,
+}
+
+pub struct Miner {
+    pub clips: Vec<ActiveClip>,
+    pub broadcaster: Broadcaster,
+    pub submissions: usize,
+}
+
+impl Miner {
+    #[inline(always)]
+    pub fn new(activation: u64) -> Self {
+        let broadcaster = Broadcaster::init();
+        let substrates = Substrate::discover(activation);
+
+        assert!(
+            !substrates.is_empty(),
+            "No substrates discovered."
+        );
+
+        println!(
+            "⚡ Miner online substrates={}",
+            substrates.len(),
+        );
+
+        let clips = substrates
+            .into_iter()
+            .map(|substrate| ActiveClip {
+                substrate: substrate.lab,
+                activation: substrate.activation,
+            })
+            .collect::<Vec<_>>();
+
+        Self {
+            clips,
+            broadcaster,
+            submissions: 0,
+        }
+    }
+}
 pub fn submit(
     &mut self,
     substrate: &str,
