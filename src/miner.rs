@@ -1,3 +1,20 @@
+use qp_hd::{
+    commands::{
+        load_depth,
+        qtm_open_manifold_until,
+        substrate_root,
+    },
+    protocolvalue::Qtm,
+    qp44::QP44Event,
+};
+use qtm_graph::graph::frame::Direction;
+
+use crate::{
+    bitcoinpayload::{BitcoinPayload, PayloadType},
+    broadcast::Broadcaster,
+    substrate::Substrate,
+};
+
 pub struct ActiveClip {
     pub substrate: String,
     pub activation: u64,
@@ -20,10 +37,7 @@ impl Miner {
             "No substrates discovered."
         );
 
-        println!(
-            "⚡ Miner online substrates={}",
-            substrates.len(),
-        );
+        println!("⚡ Miner online substrates={}", substrates.len());
 
         let clips = substrates
             .into_iter()
@@ -39,85 +53,80 @@ impl Miner {
             submissions: 0,
         }
     }
-}
-pub fn submit(
-    &mut self,
-    substrate: &str,
-    realized: u128,
-) -> (QP44Event, Vec<WirePacket>)
 
+    #[inline(always)]
+    pub fn clips(&self) -> &[ActiveClip] {
+        &self.clips
+    }
 
-let (
-    event,
-    packets,
-) =
-    miner.submit(
-        substrate.as_str(),
-        payload.realized,
-    );
+    #[inline(always)]
+    pub fn clip(&self, substrate: &str) -> Option<&ActiveClip> {
+        self.clips
+            .iter()
+            .find(|clip| clip.substrate == substrate)
+    }
 
+    #[inline]
+    fn payload_identifier(payload_type: PayloadType) -> &'static str {
+        match payload_type {
+            PayloadType::Payload => "bitcoin/payload",
+            PayloadType::Transaction => "bitcoin/transaction",
+            PayloadType::Address => "bitcoin/address",
+            PayloadType::Wallet => "bitcoin/wallet",
+            PayloadType::Mempool => "bitcoin/mempool",
+        }
+    }
 
+    #[inline]
+    pub fn submit(
+        &mut self,
+        substrate: &str,
+        payload: BitcoinPayload,
+    ) -> QP44Event {
+        let activation = self
+            .clip(substrate)
+            .unwrap_or_else(|| {
+                panic!("active clip not found: {}", substrate)
+            })
+            .activation;
 
-let receipt =
-    EventReceipt {
+        let root = substrate_root().join(substrate);
 
-        event,
+        let opened = qtm_open_manifold_until(substrate, activation);
+        let manifold = opened.state;
+        let mut depth = load_depth(&root);
 
-        state:
-            SettlementState::Pending,
-    };
+        let mass = payload
+            .output_value_sat()
+            .unwrap_or_else(|| {
+                panic!(
+                    "BitcoinPayload output value overflow: {}",
+                    substrate
+                )
+            }) as u128;
 
+        let identifier = Self::payload_identifier(payload.payload_type);
+        let position = depth.next_position();
 
-let locked =
-    LockedStructure {
-
-        dimension:
-            event
-                .heritage
-                .state
-                .dimension(),
-
-        structural_value:
-            event
-                .heritage
-                .state
-                .structural_value(),
-    };
-
-
-
-for packet in packets {
-
-    let authorization =
-        Authorization::new(
-            packet.commitment,
-
-            event
-                .heritage
-                .state
-                .activations(),
-
-            locked,
+        depth.insert(
+            identifier,
+            position,
+            manifold.retain(mass, manifold.dimension()),
         );
 
+        let heritage = Direction::exile(manifold);
 
-    let request =
-        SettlementRequest {
-
-            packet,
-
-            authorization,
-        };
-
-
-    settlement_queue
-        .lock()
-        .unwrap()
-        .push(
-            request
+        let qtm = Qtm::commit(
+            &heritage.state,
+            heritage.transition.net_work,
         );
+
+        self.submissions = self.submissions.saturating_add(1);
+
+        QP44Event {
+            heritage,
+            qtm,
+            depth,
+        }
+    }
 }
-
-
-receipt
-
