@@ -39,6 +39,13 @@ pub struct BitcoinPayload {
     pub outputs: BitcoinOutput,
 }
 
+pub struct BitcointxPayload {
+    pub txid: Txid,
+    pub inputs: Vec<BitcoinInput>,
+    pub outputs: Vec<BitcoinOutput>,
+    pub payload_type: Transaction,  // kept from existing helpers
+}
+
 impl BitcoinPayload {
     #[inline]
     pub fn new(inputs: BitcoinInput, outputs: BitcoinOutput) -> Self {
