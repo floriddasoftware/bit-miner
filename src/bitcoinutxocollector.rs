@@ -10,7 +10,7 @@ impl BitcoinUTXOCollector {
         substrate: &str,
         transactions: &[ObservedBitcoinTransaction],
         mut submit: F,
-    ) -> Vec<PendingQPEvent>
+    ) -> Vec<QP44Event>
     where
         F: FnMut(u128) -> EventReceipt,
     {
