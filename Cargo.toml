@@ -22,3 +22,4 @@ rand = "0.8"
 mio = { version = "1", features = ["net", "os-poll"] }
 qp-hd = { git = "https://github.com/floriddasoftware/QTM" }
 qtm-graph = { git = "https://github.com/floriddasoftware/Quantum-Economies" }
+quantom_value = { git = "https://github.com/QuantPerm-Labs/Quantom-VALUE" }
