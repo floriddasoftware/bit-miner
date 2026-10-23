@@ -1,4 +1,6 @@
-impl BitcoinUTXOCollector {
+pub struct BitcoinUTXOCollector;
+    
+    impl BitcoinUTXOCollector {
     #[inline(always)]
     pub fn new() -> Self {
         Self
