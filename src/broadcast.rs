@@ -57,6 +57,26 @@ impl FinalizedSettlement {
             .as_ref()
             .map(|receipt| &receipt.script_pubkey)
     }
+    
+
+    #[inline]
+    pub fn wire_packets(
+        &self,
+        commitment: [u8; 32],
+    ) -> Vec<WirePacket> {
+        self.transaction
+            .output
+            .iter()
+            .enumerate()
+            .filter_map(|(index, output)| {
+                self.wire_packet(
+                    u32::try_from(index).ok()?,
+                    commitment,
+                )
+            })
+            .collect()
+    }
+
 
     /// Constructs a packet for an existing transaction output.
     ///
