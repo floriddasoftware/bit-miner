@@ -1,11 +1,4 @@
 //! bit_minner — Bitcoin observation / settlement support for QTM.
-//!
-//! Public surface used by qtm-api:
-//! - [`BitcoinObservationPipeline`] (`bitcoinObserverpipeline.rs`)
-//! - [`RenderState`] (`render.rs`)
-//! - shared authorization / settlement types (`sharedtypes.rs`)
-
-// Module paths preserve existing on-disk filenames (mixed case).
 
 pub mod sharedtypes;
 
@@ -51,11 +44,23 @@ pub mod bitcoinutxocollector;
 #[path = "settlement.rs"]
 pub mod settlement;
 
-// --- Primary exports for qtm-api ---
-
+// Primary exports.
 pub use bitcoin_observation_pipeline::BitcoinObservationPipeline;
 pub use render::RenderState;
 
+pub use bitcoinpayload::{
+    BitcoinMempool,
+    BitcoinPayload,
+    BitcoinWallet,
+    PayloadComponent,
+    PayloadType,
+};
+
+pub use bitcoinutxocollector::BitcoinUTXOCollector;
+
 pub use sharedtypes::{
-    Authorization, AuthorizationState, SettlementRequest, SettlementState,
+    Authorization,
+    AuthorizationState,
+    SettlementRequest,
+    SettlementState,
 };
