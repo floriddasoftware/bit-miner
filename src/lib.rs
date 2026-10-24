@@ -18,6 +18,9 @@ pub mod bitcoinreceipt;
 #[path = "bitcoinpayload.rs"]
 pub mod bitcoinpayload;
 
+#[path = "observestream.rs"]
+pub mod observestream;
+
 #[path = "bitcoinoutputqpinput.rs"]
 pub mod bitcoinoutputqpinput;
 
