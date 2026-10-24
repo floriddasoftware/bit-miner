@@ -4,63 +4,89 @@ use qp_hd::{
 use crate::observebitcointransaction::ObserveditcoinTransaction;
 
 
-pub struct BitcoinUTXOCollector;
-    
-    impl BitcoinUTXOCollector {
-    #[inline(always)]
-    pub fn new() -> Self {
-        Self
+pub struct BitcoinUTXOCollector {
+    pub payload: BitcoinPayload,
+}
+
+pub struct BitcoinUTXOCollector {
+    pub payload: BitcoinPayload,
+}
+
+impl BitcoinUTXOCollector {
+    pub fn new(payload: BitcoinPayload) -> Self {
+        Self { payload }
     }
 
     #[inline(always)]
-    pub fn collect<F>(
+    pub fn collect(
         &mut self,
-        substrate: &str,
-        transactions: &[ObservedBitcoinTransaction],
-        mut submit: F,
-    ) -> Vec<QP44Event>
-    where
-        F: FnMut(u128) -> EventReceipt,
-    {
-        let mut pending = Vec::new();
+        observed: &ObservedBitcoinTransaction,
+        event: &EventReceipt,
+    ) -> Result<(BitcoinPayload, Vec<Retain>), SettlementError> {
+        let tx = &observed.transaction;
+        let manifold = &event.event.heritage.state;
+        let mut retained = Vec::new();
 
-        for observed in transactions {
-            println!(
-                "[UTXO] substrate={} txid={} outputs={}",
-                substrate,
-                observed.txid,
-                observed.outputs.len(),
-            );
+        let outputs = tx
+            .output
+            .iter()
+            .enumerate()
+            .map(|(vout, output)| {
+                let (bitcoin, retain) = BitcoinOutput::new(
+                    manifold,
+                    vout as u32,
+                    output.value.to_sat(),
+                    output.script_pubkey.clone(),
+                );
 
-            for (position, output) in observed.outputs.iter().enumerate() {
-                let utxo = BitcoinUTXO {
-                    outpoint: bitcoin::OutPoint {
+                retained.push(retain);
+                bitcoin
+            })
+            .collect::<Vec<_>>();
+
+        let inputs = tx
+            .output
+            .iter()
+            .enumerate()
+            .map(|(vout, _)| {
+                let (input, retain) = BitcoinInput::new(
+                    manifold,
+                    bitcoin::OutPoint {
                         txid: observed.txid,
-                        vout: output.vout,
+                        vout: vout as u32,
                     },
-                    value: output.value,
-                    confirmations: 0,
-                    coinbase: false,
-                    script_pubkey: output.script_pubkey.clone(),
-                    state: UTXOState::Unspent,
-                };
+                    bitcoin::ScriptBuf::new(),
+                    bitcoin::Witness::default(),
+                    bitcoin::Sequence::MAX,
+                );
 
-                let Payload {
-                    realized,
-                    bitcoin,
-                    ..
-                } = utxo.payload();
+                retained.push(retain);
+                input
+            })
+            .collect::<Vec<_>>();
 
-                let receipt = submit(realized);
+        // Preserve the existing QP44 execution topology.
+        for (index, input) in inputs.iter().enumerate() {
+            let expected = bitcoin::OutPoint {
+                txid: observed.txid,
+                vout: index as u32,
+            };
 
-                pending.push(PendingQPEvent {
-                    receipt,
-                    bitcoin,
-                    position,
-                });
-            }
+            assert_eq!(
+                input.previous_output,
+                expected,
+                "QP44 execution topology changed at vout={}: expected={}:{} payload={}:{}",
+                index,
+                expected.txid,
+                expected.vout,
+                input.previous_output.txid,
+                input.previous_output.vout,
+            );
         }
 
-        pending
+        let payload = BitcoinPayload::new(observed.txid, inputs, outputs);
+        self.payload = payload;
+
+        Ok((self.payload.clone(), retained))
     }
 }
