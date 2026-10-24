@@ -21,6 +21,8 @@ pub mod bitcoinpayload;
 #[path = "bitcoinoutputqpinput.rs"]
 pub mod bitcoinoutputqpinput;
 
+#[path = "qpeventreceipt.rs"]
+pub mod qpeventreceipt;
 
 #[path = "miner.rs"]
 pub mod miner;
