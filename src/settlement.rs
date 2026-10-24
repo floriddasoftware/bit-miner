@@ -1,17 +1,9 @@
-use bitcoin::{
-    Amount,
-    Transaction,
-    Version,
-    TxIn,
-    TxOut,
-    Sequence,
-    absolute::LockTime,
-};
+use bitcoin::Transaction;
 
-use crate::bit_block::derive_p2wpkh_witness;
 use crate::bitcoinpayload::BitcoinPayload;
 use crate::bitcoinreceipt::SettlementReceipt;
 use crate::observebitcointransaction::ObservedBitcoinTransaction;
+use crate::broadcast::Finalizedsettlement;
 use crate::sharedtypes::SettlementState;
 use qp_hd::qp44::{PQ44Event, QP44Event};
 
@@ -124,14 +116,14 @@ impl SettlementEngine {
         bitcoin: BitcoinPayload,
         observed: ObservedBitcoinTransaction,
     ) -> Result<FinalizedSettlement, SettlementError> {
-        let receipt = Self::settle(receipt)?;
+        let receipt = Self::settle(receipt);
 
         let parent = observed.transaction.clone();
 
         let transaction = Self::materialize(
             &receipt,
             bitcoin,
-            observed.source.clone(),
+            observed,
         )?;
 
         let vout = transaction
@@ -162,7 +154,7 @@ impl SettlementEngine {
         let transaction = Self::materialize(
             &receipt,
             bitcoin,
-            observed.source.clone(),
+            observed,
         )?;
 
         let vout = transaction
@@ -198,7 +190,7 @@ impl SettlementEngine {
     fn materialize(
         receipt: &SettlementReceipt,
         bitcoin: BitcoinPayload,
-        source: BitcoinObservationSource,
+        observed: ObservedBitcoinTransaction,
     ) -> Result<Transaction, SettlementError> {
         match receipt.state {
             SettlementState::Success => {}
@@ -226,49 +218,13 @@ impl SettlementEngine {
             ));
         }
 
-        let signing_inputs = bitcoin.inputs.clone();
-
-        let mut observed = ObservedBitcoinTransaction::new_transact(
-            &receipt.event.heritage.state,
-            bitcoin,
-            source,
-        );
-
-        let last_output = observed
-            .transaction
-            .output
-            .last_mut()
-            .ok_or(SettlementError::Unsupported(
-                "settlement transaction has no outputs",
-            ))?;
-
-        last_output.script_pubkey = receipt.script_pubkey.clone();
-
-        let mut transaction = observed.transaction;
-
-        if transaction.input.len() != signing_inputs.len() {
-            return Err(SettlementError::Backend(
-                "materialized input count differs from signing input count"
-                    .into(),
-            ));
-        }
-
-        for (index, input) in signing_inputs.iter().enumerate() {
-            let coordinate = input.coordinate.ok_or(
-                SettlementError::Unsupported(
-                    "P2WPKH input has no owning coordinate",
-                ),
-            )?;
-
-            transaction.input[index].witness =
-                derive_p2wpkh_witness(
-                    &coordinate,
-                    &transaction,
-                    index,
-                    input.value,
-                );
-        }
-
-        Ok(transaction)
+        Ok(
+            ObservedBitcoinTransaction::new_transact(
+                &receipt.event.heritage.state,
+                bitcoin,
+                observed.source,
+            )
+            .transaction,
+        )
     }
 }
