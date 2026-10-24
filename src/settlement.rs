@@ -110,68 +110,44 @@ impl SettlementEngine {
     }
 
     #[inline(always)]
-    pub fn process(
-        &self,
-        receipt: EventReceipt,
-        bitcoin: BitcoinPayload,
-        observed: ObservedBitcoinTransaction,
-    ) -> Result<FinalizedSettlement, SettlementError> {
-        let receipt = Self::settle(receipt);
+pub fn process(
+    &self,
+    receipt: EventReceipt,
+    bitcoin: BitcoinPayload,
+    observed: ObservedBitcoinTransaction,
+) -> Result<FinalizedSettlement, SettlementError> {
+    let receipt = Self::settle(receipt);
 
-        let parent = observed.transaction.clone();
+    let transaction = Self::materialize(
+        &receipt,
+        bitcoin,
+        observed,
+    )?;
 
-        let transaction = Self::materialize(
-            &receipt,
-            bitcoin,
-            observed,
-        )?;
+    Ok(FinalizedSettlement::new(
+        Some(receipt),
+        transaction,
+    ))
+}
 
-        let vout = transaction
-            .output
-            .len()
-            .checked_sub(1)
-            .ok_or(SettlementError::Unsupported(
-                "settlement transaction has no outputs",
-            ))? as u32;
+#[inline(always)]
+pub fn proceed(
+    &self,
+    receipt: SettlementReceipt,
+    bitcoin: BitcoinPayload,
+    observed: ObservedBitcoinTransaction,
+) -> Result<FinalizedSettlement, SettlementError> {
+    let transaction = Self::materialize(
+        &receipt,
+        bitcoin,
+        observed,
+    )?;
 
-        Ok(FinalizedSettlement::new(
-            Some(receipt),
-            parent,
-            transaction,
-            vout,
-        ))
-    }
-
-    #[inline(always)]
-    pub fn proceed(
-        &self,
-        receipt: SettlementReceipt,
-        bitcoin: BitcoinPayload,
-        observed: ObservedBitcoinTransaction,
-    ) -> Result<FinalizedSettlement, SettlementError> {
-        let parent = observed.transaction.clone();
-
-        let transaction = Self::materialize(
-            &receipt,
-            bitcoin,
-            observed,
-        )?;
-
-        let vout = transaction
-            .output
-            .len()
-            .checked_sub(1)
-            .ok_or(SettlementError::Unsupported(
-                "settlement transaction has no outputs",
-            ))? as u32;
-
-        Ok(FinalizedSettlement::new(
-            Some(receipt),
-            parent,
-            transaction,
-            vout,
-        ))
-    }
+    Ok(FinalizedSettlement::new(
+        Some(receipt),
+        transaction,
+    ))
+}
 
     #[inline(always)]
     pub fn coinbase(
