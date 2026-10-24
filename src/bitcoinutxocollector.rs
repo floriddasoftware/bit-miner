@@ -1,7 +1,7 @@
 use qp_hd::{
     qp44::QP44Event,
 };
-use crate::observedbitcointransaction::ObservedBitcoinTransaction;
+use crate::observebitcointransaction::ObserveditcoinTransaction;
 
 
 pub struct BitcoinUTXOCollector;
