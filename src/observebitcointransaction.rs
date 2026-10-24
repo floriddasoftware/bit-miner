@@ -4,7 +4,7 @@ use quantom_value::QuantPerm;
 use qp_hd::protocolvalue::Qtm;
 
 use crate::bitcoinpayload::BitcoinPayload;
-use crate::bitcoinobservation::{
+use crate::observestream::{
     BitcoinObservation,
     BitcoinObservationSource,
 };
