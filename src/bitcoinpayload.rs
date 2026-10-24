@@ -1,19 +1,5 @@
-use bitcoin::{
-absolute::LockTime,
-hashes::Hash,
-transaction::Version,
-Address,
-Amount,
-ScriptBuf,
-Transaction,
-TxIn,
-TxOut,
-Txid,
-Witness,
-};
 use qtm_graph::graph::frame::{Depth, Direction};
 use quantom_value::{QuantPerm, Retain};
-use qp_hd::protocolvalue::Qtm;
 
 use crate::bitcoinoutputqpinput::BitcoinOutput;
 use crate::qpoutputsbitcoininput::BitcoinInput;
@@ -22,10 +8,9 @@ use crate::qpoutputsbitcoininput::BitcoinInput;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum PayloadType {
 Payload = 0,
-Transaction = 1,
-Address = 2,
-Wallet = 3,
-Mempool = 4,
+Address = 1,
+Wallet = 2,
+Mempool = 3,
 }
 
 pub trait PayloadComponent: std::fmt::Debug + Send + Sync {
@@ -57,121 +42,68 @@ fn mass(
 #[derive(Clone, Debug, Default)]
 pub struct BitcoinWallet {
 pub addresses: Vec,
-pub transactions: Vec,
 }
 
 #[derive(Clone, Debug, Default)]
 pub struct BitcoinMempool {
-pub transactions: Vec,
+pub transaction_ids: Vec,
 }
 
 #[repr(C)]
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct BitcoinPayload {
-pub txid: Txid,
+pub addresses: Vec,
 pub inputs: Vec,
 pub outputs: Vec,
 pub payload_type: PayloadType,
 }
 
+impl Default for PayloadType {
+#[inline(always)]
+fn default() -> Self {
+Self::Payload
+}
+}
+
 impl BitcoinPayload {
 #[inline(always)]
 pub fn new(
-txid: Txid,
 inputs: Vec,
 outputs: Vec,
 ) -> Self {
 Self {
-txid,
+addresses: Vec::new(),
 inputs,
 outputs,
 payload_type: PayloadType::Payload,
 }
 }
 
-#[inline]
-pub fn from_transaction(transaction: &Transaction) -> Self {
-    let inputs = transaction
-        .input
-        .iter()
-        .map(|txin| BitcoinInput {
-            previous_output: txin.previous_output,
-            script_sig: txin.script_sig.clone(),
-            witness: txin.witness.clone(),
-            sequence: txin.sequence,
-        })
-        .collect();
-    let outputs = transaction
-        .output
-        .iter()
-        .enumerate()
-        .map(|(index, txout)| BitcoinOutput {
-            vout: u32::try_from(index).unwrap_or(u32::MAX),
-            value: txout.value.to_sat(),
-            script_pubkey: txout.script_pubkey.clone(),
-        })
-        .collect();
+#[inline(always)]
+pub fn from_address(address: impl Into<String>) -> Self {
     Self {
-        txid: transaction.compute_txid(),
-        inputs,
-        outputs,
-        payload_type: PayloadType::Transaction,
-    }
-}
-#[inline]
-pub fn from_address(_address: &Address) -> Self {
-    Self {
-        txid: Txid::from_byte_array([0u8; 32]),
+        addresses: vec![address.into()],
         inputs: Vec::new(),
         outputs: Vec::new(),
         payload_type: PayloadType::Address,
     }
 }
-#[inline]
-pub fn from_wallet(_wallet: &BitcoinWallet) -> Self {
+#[inline(always)]
+pub fn from_wallet(wallet: &BitcoinWallet) -> Self {
     Self {
-        txid: Txid::from_byte_array([0u8; 32]),
+        addresses: wallet.addresses.clone(),
         inputs: Vec::new(),
         outputs: Vec::new(),
         payload_type: PayloadType::Wallet,
     }
 }
-#[inline]
-pub fn from_mempool(_mempool: &BitcoinMempool) -> Self {
+#[inline(always)]
+pub fn from_mempool(mempool: &BitcoinMempool) -> Self {
     Self {
-        txid: Txid::from_byte_array([0u8; 32]),
+        addresses: Vec::new(),
         inputs: Vec::new(),
         outputs: Vec::new(),
         payload_type: PayloadType::Mempool,
-    }
-}
-#[inline]
-pub fn transaction(
-    &self,
-    version: Version,
-    lock_time: LockTime,
-) -> Transaction {
-    Transaction {
-        version,
-        lock_time,
-        input: self
-            .inputs
-            .iter()
-            .map(|input| TxIn {
-                previous_output: input.previous_output,
-                script_sig: input.script_sig.clone(),
-                witness: input.witness.clone(),
-                sequence: input.sequence,
-            })
-            .collect(),
-        output: self
-            .outputs
-            .iter()
-            .map(|output| TxOut {
-                value: Amount::from_sat(output.value),
-                script_pubkey: output.script_pubkey.clone(),
-            })
-            .collect(),
     }
 }
 #[inline(always)]
@@ -182,60 +114,83 @@ pub fn input_count(&self) -> usize {
 pub fn output_count(&self) -> usize {
     self.outputs.len()
 }
+#[inline(always)]
+pub fn address_count(&self) -> usize {
+    self.addresses.len()
+}
 #[inline]
 pub fn output_value_sat(&self) -> Option<u64> {
     self.outputs
         .iter()
         .try_fold(0u64, |sum, output| sum.checked_add(output.value))
 }
-#[inline]
+#[inline(always)]
 pub fn output_at(&self, index: usize) -> Option<&BitcoinOutput> {
     self.outputs.get(index)
 }
-#[inline]
+#[inline(always)]
 pub fn input_at(&self, index: usize) -> Option<&BitcoinInput> {
     self.inputs.get(index)
 }
 #[inline(always)]
-pub fn fee_mass(&self, manifold: &QuantPerm) -> u128 {
-    self.replay_mass(manifold) / 100
-}
-#[inline(always)]
-pub fn replay_mass(&self, manifold: &QuantPerm) -> u128 {
-    let coordinate = Qtm::derive_coordinate(manifold);
-    let script = crate::bit_block::derive_script_pubkey(coordinate)
-        .unwrap_or_else(|_| ScriptBuf::new());
+pub fn retained(&self, manifold: &QuantPerm) -> Retain {
     let input_mass = self
         .inputs
         .iter()
         .enumerate()
-        .map(|(position, input)| {
-            let shaped = BitcoinInput {
-                previous_output: input.previous_output,
-                script_sig: script.clone(),
-                witness: Witness::new(),
-                sequence: input.sequence,
-            };
-            shaped.deep(manifold, "input", position).mass
-        })
-        .fold(0u128, u128::saturating_add);
+        .fold(0u128, |mass, (position, input)| {
+            mass.saturating_add(
+                input.deep(manifold, "input", position).mass,
+            )
+        });
     let output_offset = self.inputs.len();
     let output_mass = self
         .outputs
         .iter()
         .enumerate()
-        .map(|(position, output)| {
-            let shaped = BitcoinOutput {
-                vout: output.vout,
-                value: output.value,
-                script_pubkey: script.clone(),
-            };
-            shaped
-                .deep(manifold, "output", output_offset + position)
-                .mass
-        })
-        .fold(0u128, u128::saturating_add);
-    input_mass.saturating_add(output_mass)
+        .fold(0u128, |mass, (position, output)| {
+            mass.saturating_add(
+                output
+                    .deep(manifold, "output", output_offset + position)
+                    .mass,
+            )
+        });
+    let address_offset = self.inputs.len().saturating_add(self.outputs.len());
+    let address_mass = self
+        .addresses
+        .iter()
+        .enumerate()
+        .fold(0u128, |mass, (position, address)| {
+            let address_mass = address
+                .as_bytes()
+                .iter()
+                .fold(0u128, |sum, byte| {
+                    sum.saturating_add(u128::from(*byte))
+                });
+            let retained = manifold.retain(
+                address_mass,
+                manifold.dimension(),
+            );
+            let mut depth = Depth::new("qp/payload");
+            depth.insert("address", address_offset + position, retained);
+            mass.saturating_add(
+                Direction::realize_depth(manifold, &depth).mass,
+            )
+        });
+    manifold.retain(
+        input_mass
+            .saturating_add(output_mass)
+            .saturating_add(address_mass),
+        manifold.dimension(),
+    )
+}
+#[inline(always)]
+pub fn replay_mass(&self, manifold: &QuantPerm) -> u128 {
+    self.retained(manifold).mass
+}
+#[inline(always)]
+pub fn fee_mass(&self, manifold: &QuantPerm) -> u128 {
+    self.replay_mass(manifold) / 100
 }
 
 }
