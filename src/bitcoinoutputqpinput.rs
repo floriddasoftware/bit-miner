@@ -24,6 +24,13 @@ pub struct BitcoinOutput {
     pub script_pubkey: ScriptBuf,
 }
 
+#[inline(always)]
+fn bytes_mass(bytes: &[u8]) -> u128 {
+    bytes.iter().fold(0u128, |mass, byte| {
+        mass.saturating_add(*byte as u128)
+    })
+}
+
 impl BitcoinOutput {
     #[inline(always)]
     pub fn new(
@@ -39,15 +46,15 @@ impl BitcoinOutput {
         };
 
         let retained = output.deep(manifold, "qp/payload", vout as usize);
-
         (output, retained)
     }
 
     #[inline(always)]
     pub fn assign(
         &mut self,
+        manifold: &QuantPerm,
         private_key: [u8; 32],
-    ) -> BitcoinOutputResult<()> {
+    ) -> BitcoinOutputResult<Retain> {
         self.script_pubkey = p2wpkh_script(private_key)?;
 
         println!(
@@ -56,14 +63,15 @@ impl BitcoinOutput {
             hex::encode(self.script_pubkey.as_bytes()),
         );
 
-        Ok(())
+        Ok(self.deep(manifold, "qp/payload", self.vout as usize))
     }
 
     #[inline(always)]
     pub fn assign_public_key(
         &mut self,
+        manifold: &QuantPerm,
         public_key: PublicKey,
-    ) {
+    ) -> Retain {
         let hash160 = WPubkeyHash::hash(&public_key.to_bytes());
         self.script_pubkey = ScriptBuf::new_p2wpkh(&hash160);
 
@@ -72,16 +80,21 @@ impl BitcoinOutput {
             self.vout,
             hex::encode(self.script_pubkey.as_bytes()),
         );
+
+        self.deep(manifold, "qp/payload", self.vout as usize)
     }
 
     #[inline(always)]
     pub fn assign_public_key_bytes(
         &mut self,
+        manifold: &QuantPerm,
         public_key: &[u8],
-    ) -> BitcoinOutputResult<()> {
-        let public_key = SecpPublicKey::from_slice(public_key)?;
-        self.assign_public_key(PublicKey::new(public_key));
-        Ok(())
+    ) -> BitcoinOutputResult<Retain> {
+        let secp_public_key = SecpPublicKey::from_slice(public_key)?;
+        Ok(self.assign_public_key(
+            manifold,
+            PublicKey::new(secp_public_key),
+        ))
     }
 }
 
@@ -98,20 +111,26 @@ impl PayloadComponent for BitcoinOutput {
         depth.insert(
             "vout",
             position,
-            manifold.retain(self.vout as u128, manifold.dimension()),
+            manifold.retain(
+                self.vout as u128,
+                manifold.dimension(),
+            ),
         );
 
         depth.insert(
             "value",
             position + 1,
-            manifold.retain(self.value as u128, manifold.dimension()),
+            manifold.retain(
+                self.value as u128,
+                manifold.dimension(),
+            ),
         );
 
         depth.insert(
             "script_pubkey",
             position + 2,
             manifold.retain(
-                self.script_pubkey.as_bytes().len() as u128,
+                bytes_mass(self.script_pubkey.as_bytes()),
                 manifold.dimension(),
             ),
         );
@@ -120,14 +139,11 @@ impl PayloadComponent for BitcoinOutput {
     }
 
     #[inline(always)]
-    fn retained(
-        &self,
-        manifold: &QuantPerm,
-    ) -> Retain {
+    fn retained(&self, manifold: &QuantPerm) -> Retain {
         manifold.retain(
             (self.vout as u128)
                 .saturating_add(self.value as u128)
-                .saturating_add(self.script_pubkey.as_bytes().len() as u128),
+                .saturating_add(bytes_mass(self.script_pubkey.as_bytes())),
             manifold.dimension(),
         )
     }
