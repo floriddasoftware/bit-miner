@@ -154,7 +154,7 @@ impl PayloadComponent for BitcoinInput {
 fn deep(
 &self,
 manifold: &QuantPerm,
-_: impl Into,
+_: impl Into<String>,
 position: usize,
 ) -> Retain {
 let mut depth = Depth::new(“qp/payload”);
