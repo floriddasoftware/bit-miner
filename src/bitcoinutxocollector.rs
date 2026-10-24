@@ -1,3 +1,8 @@
+use qp_hd::{
+    qp44::QP44Event,
+};
+
+
 pub struct BitcoinUTXOCollector;
     
     impl BitcoinUTXOCollector {
