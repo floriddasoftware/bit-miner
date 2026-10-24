@@ -3,7 +3,7 @@ use crate::qpeventreceipt::EventReceipt;
 use crate::bitcoinpayload::BitcoinPayload;
 use crate::bitcoinreceipt::SettlementReceipt;
 use crate::observebitcointransaction::ObservedBitcoinTransaction;
-use crate::broadcast::Finalizedsettlement;
+use crate::broadcast::FinalizedSettlement;
 use crate::sharedtypes::SettlementState;
 use qp_hd::qp44::{PQ44Event, QP44Event};
 
