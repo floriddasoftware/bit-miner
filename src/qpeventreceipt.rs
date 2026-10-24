@@ -1,3 +1,6 @@
+use qp_hd::qp44::{QP44Event};
+use qp_hd::protocol_id{LockedStructure};
+
 #[repr(C)]
 pub struct EventReceipt {
     pub event: QP44Event,
