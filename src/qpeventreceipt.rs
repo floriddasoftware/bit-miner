@@ -1,6 +1,13 @@
-use qp_hd::qp44::{QP44Event};
-use qp_hd::protocol_id::{LockedStructure};
-use crate::sharedtypes::{SettlementState};
+use bitcoin::ScriptBuf;
+use qp_hd::{
+    protocol_id::LockedStructure,
+    qp44::QP44Event,
+};
+
+use crate::{
+    bit_block::{derive_public_key, p2wpkh_script},
+    sharedtypes::SettlementState,
+};
 
 #[repr(C)]
 pub struct EventReceipt {
@@ -17,8 +24,7 @@ impl EventReceipt {
         state: SettlementState,
         locked: LockedStructure,
     ) -> Self {
-        let (_, hash160) =
-            derive_public_key(&event.qtm.coordinate);
+        let (_, hash160) = derive_public_key(&event.qtm.coordinate);
 
         Self {
             event,
