@@ -1,5 +1,5 @@
 use bitcoin::Transaction;
-
+use crate::qpeventreceipt::EventReceipt;
 use crate::bitcoinpayload::BitcoinPayload;
 use crate::bitcoinreceipt::SettlementReceipt;
 use crate::observebitcointransaction::ObservedBitcoinTransaction;
