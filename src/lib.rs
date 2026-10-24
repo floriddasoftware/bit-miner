@@ -33,6 +33,9 @@ pub mod qpoutputsbitcoininput;
 #[path = "render.rs"]
 pub mod render;
 
+#[path = "observebitcointransaction.rs"]
+pub mod observebitcointransaction;
+
 #[path = "bitcoinObserverpipeline.rs"]
 pub mod bitcoin_observation_pipeline;
 
