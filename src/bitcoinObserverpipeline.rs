@@ -8,6 +8,7 @@ use crate::{
     miner::Miner,
     sharedtypes::SettlementState,
     settlement::{SettlementEngine, SettlementError},
+    observebitcointransaction::ObservedBitcoinTransaction;
 };
 
 pub struct BitcoinObservationPipeline {
