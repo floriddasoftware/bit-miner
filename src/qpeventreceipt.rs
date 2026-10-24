@@ -20,19 +20,20 @@ pub struct EventReceipt {
 impl EventReceipt {
     #[inline(always)]
     pub fn new(
-        event: QP44Event,
-        state: SettlementState,
-        locked: LockedStructure,
-    ) -> Self {
-        let (_, hash160) = derive_public_key(&event.qtm.coordinate);
+    event: QP44Event,
+    state: SettlementState,
+    locked: LockedStructure,
+) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+    let (_, hash160) = derive_public_key(event.qtm.coordinate)?;
+    let script_pubkey = p2wpkh_script(event.qtm.coordinate)?;
 
-        Self {
-            event,
-            state,
-            locked,
-            script_pubkey: p2wpkh_script(&hash160),
-        }
-    }
+    Ok(Self {
+        event,
+        state,
+        locked,
+        script_pubkey,
+    })
+}
 
     #[inline(always)]
     pub fn retained_mass(&self) -> u128 {
