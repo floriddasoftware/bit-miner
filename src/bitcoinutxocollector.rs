@@ -1,15 +1,20 @@
-use qp_hd::{
-    qp44::QP44Event,
-};
-use crate::observebitcointransaction::ObservedBitcoinTransaction;
+use quantom_value::Retain;
 
+use crate::{
+    bitcoinoutputqpinput::BitcoinOutput,
+    bitcoinpayload::BitcoinPayload,
+    observebitcointransaction::ObservedBitcoinTransaction,
+    qpeventreceipt::EventReceipt,
+    qpoutputsbitcoininput::BitcoinInput,
+    settlement::SettlementError,
+};
 
 pub struct BitcoinUTXOCollector {
     pub payload: BitcoinPayload,
 }
 
-
 impl BitcoinUTXOCollector {
+    #[inline(always)]
     pub fn new(payload: BitcoinPayload) -> Self {
         Self { payload }
     }
@@ -20,11 +25,11 @@ impl BitcoinUTXOCollector {
         observed: &ObservedBitcoinTransaction,
         event: &EventReceipt,
     ) -> Result<(BitcoinPayload, Vec<Retain>), SettlementError> {
-        let tx = &observed.transaction;
+        let transaction = &observed.transaction;
         let manifold = &event.event.heritage.state;
         let mut retained = Vec::new();
 
-        let outputs = tx
+        let outputs = transaction
             .output
             .iter()
             .enumerate()
@@ -39,9 +44,9 @@ impl BitcoinUTXOCollector {
                 retained.push(retain);
                 bitcoin
             })
-            .collect::<Vec<_>>();
+            .collect::<Vec<BitcoinOutput>>();
 
-        let inputs = tx
+        let inputs = transaction
             .output
             .iter()
             .enumerate()
@@ -60,9 +65,8 @@ impl BitcoinUTXOCollector {
                 retained.push(retain);
                 input
             })
-            .collect::<Vec<_>>();
+            .collect::<Vec<BitcoinInput>>();
 
-        // Preserve the existing QP44 execution topology.
         for (index, input) in inputs.iter().enumerate() {
             let expected = bitcoin::OutPoint {
                 txid: observed.txid,
@@ -72,7 +76,8 @@ impl BitcoinUTXOCollector {
             assert_eq!(
                 input.previous_output,
                 expected,
-                "QP44 execution topology changed at vout={}: expected={}:{} payload={}:{}",
+                "QP44 execution topology changed at vout={}: \
+                 expected={}:{} payload={}:{}",
                 index,
                 expected.txid,
                 expected.vout,
@@ -81,7 +86,7 @@ impl BitcoinUTXOCollector {
             );
         }
 
-        let payload = BitcoinPayload::new(observed.txid, inputs, outputs);
+        let payload = BitcoinPayload::new(inputs, outputs);
         self.payload = payload;
 
         Ok((self.payload.clone(), retained))
