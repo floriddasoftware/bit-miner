@@ -1,19 +1,27 @@
-use bitcoin::ScriptBuf;
+
+use std::error::Error;
+
+use bitcoin::{
+    hashes::Hash,
+    secp256k1::PublicKey as SecpPublicKey,
+    PublicKey, ScriptBuf, WPubkeyHash,
+};
 use quantom_value::{QuantPerm, Retain};
-use qp_hd::protocolvalue::Qtm;
 use qtm_graph::graph::frame::{Depth, Direction};
 
-use crate::bitcoinpayload::PayloadComponent;
+use crate::{
+    bit_block::p2wpkh_script,
+    bitcoinpayload::PayloadComponent,
+};
 
-// Bitcoin Output
-// -----------------------------------------------------------------------------
+type BitcoinOutputResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 
 #[repr(C)]
 #[derive(Clone, Debug)]
 pub struct BitcoinOutput {
     pub vout: u32,
     pub value: u64,
-    pub script_pubkey: bitcoin::ScriptBuf,
+    pub script_pubkey: ScriptBuf,
 }
 
 impl BitcoinOutput {
@@ -29,31 +37,51 @@ impl BitcoinOutput {
             value,
             script_pubkey,
         };
+
         let retained = output.deep(manifold, "qp/payload", vout as usize);
+
         (output, retained)
     }
 
     #[inline(always)]
     pub fn assign(
         &mut self,
-        manifold: &QuantPerm,
-    ) {
-        let coordinate = Qtm::derive_coordinate(manifold);
-
-        let (_compressed_pubkey, hash160) =
-            crate::bit_block::derive_public_key(&coordinate);
-
-        // Lock the output script to the derived P2WPKH witness coordinate
-        let wpkh = bitcoin::WPubkeyHash::from_slice(&hash160)
-            .expect("valid hash160 length for WPubkeyHash");
-        
-        self.script_pubkey = bitcoin::ScriptBuf::new_p2wpkh(&wpkh);
+        private_key: [u8; 32],
+    ) -> BitcoinOutputResult<()> {
+        self.script_pubkey = p2wpkh_script(private_key)?;
 
         println!(
-            "trace=bitcoin_output_assigned vout={} script={}",
+            "trace=assigned vout={} script={}",
             self.vout,
             hex::encode(self.script_pubkey.as_bytes()),
         );
+
+        Ok(())
+    }
+
+    #[inline(always)]
+    pub fn assign_public_key(
+        &mut self,
+        public_key: PublicKey,
+    ) {
+        let hash160 = WPubkeyHash::hash(&public_key.to_bytes());
+        self.script_pubkey = ScriptBuf::new_p2wpkh(&hash160);
+
+        println!(
+            "trace=assigned_public_key vout={} script={}",
+            self.vout,
+            hex::encode(self.script_pubkey.as_bytes()),
+        );
+    }
+
+    #[inline(always)]
+    pub fn assign_public_key_bytes(
+        &mut self,
+        public_key: &[u8],
+    ) -> BitcoinOutputResult<()> {
+        let public_key = SecpPublicKey::from_slice(public_key)?;
+        self.assign_public_key(PublicKey::new(public_key));
+        Ok(())
     }
 }
 
@@ -70,36 +98,25 @@ impl PayloadComponent for BitcoinOutput {
         depth.insert(
             "vout",
             position,
-            manifold.retain(
-                self.vout as u128,
-                manifold.dimension(),
-            ),
+            manifold.retain(self.vout as u128, manifold.dimension()),
         );
 
         depth.insert(
             "value",
             position + 1,
-            manifold.retain(
-                self.value as u128,
-                manifold.dimension(),
-            ),
+            manifold.retain(self.value as u128, manifold.dimension()),
         );
 
         depth.insert(
             "script_pubkey",
             position + 2,
             manifold.retain(
-                bytes_mass(
-                    self.script_pubkey.as_bytes(),
-                ),
+                self.script_pubkey.as_bytes().len() as u128,
                 manifold.dimension(),
             ),
         );
 
-        Direction::realize_depth(
-            manifold,
-            &depth,
-        )
+        Direction::realize_depth(manifold, &depth)
     }
 
     #[inline(always)]
@@ -110,11 +127,7 @@ impl PayloadComponent for BitcoinOutput {
         manifold.retain(
             (self.vout as u128)
                 .saturating_add(self.value as u128)
-                .saturating_add(
-                    bytes_mass(
-                        self.script_pubkey.as_bytes(),
-                    ),
-                ),
+                .saturating_add(self.script_pubkey.as_bytes().len() as u128),
             manifold.dimension(),
         )
     }
