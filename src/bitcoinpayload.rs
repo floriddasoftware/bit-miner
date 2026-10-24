@@ -41,21 +41,36 @@ fn mass(
 
 #[derive(Clone, Debug, Default)]
 pub struct BitcoinWallet {
-pub addresses: Vec,
+    pub addresses: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default)]
 pub struct BitcoinMempool {
-pub transaction_ids: Vec,
+    pub transaction_ids: Vec<bitcoin::Txid>,
 }
 
 #[repr(C)]
 #[derive(Clone, Debug, Default)]
 pub struct BitcoinPayload {
-pub addresses: Vec,
-pub inputs: Vec,
-pub outputs: Vec,
-pub payload_type: PayloadType,
+    pub addresses: Vec<String>,
+    pub inputs: Vec<BitcoinInput>,
+    pub outputs: Vec<BitcoinOutput>,
+    pub payload_type: PayloadType,
+}
+
+impl BitcoinPayload {
+    #[inline(always)]
+    pub fn new(
+        inputs: Vec<BitcoinInput>,
+        outputs: Vec<BitcoinOutput>,
+    ) -> Self {
+        Self {
+            addresses: Vec::new(),
+            inputs,
+            outputs,
+            payload_type: PayloadType::Payload,
+        }
+    }
 }
 
 impl Default for PayloadType {
