@@ -1,5 +1,6 @@
 use qp_hd::qp44::{QP44Event};
-use qp_hd::protocol_id{LockedStructure};
+use qp_hd::protocol_id::{LockedStructure};
+use crate::sharedtypes::{SettlementState};
 
 #[repr(C)]
 pub struct EventReceipt {
