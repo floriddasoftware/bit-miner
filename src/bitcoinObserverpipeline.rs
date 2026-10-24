@@ -6,9 +6,10 @@ use crate::{
     bitcoinutxocollector::BitcoinUTXOCollector,
     broadcast::FinalizedSettlement,
     miner::Miner,
+    observebitcointransaction::ObservedBitcoinTransaction,
+    qpeventreceipt::EventReceipt,
     sharedtypes::SettlementState,
     settlement::{SettlementEngine, SettlementError},
-    observebitcointransaction::ObservedBitcoinTransaction;
 };
 
 pub struct BitcoinObservationPipeline {
