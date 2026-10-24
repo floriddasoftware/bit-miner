@@ -8,9 +8,6 @@ pub struct BitcoinUTXOCollector {
     pub payload: BitcoinPayload,
 }
 
-pub struct BitcoinUTXOCollector {
-    pub payload: BitcoinPayload,
-}
 
 impl BitcoinUTXOCollector {
     pub fn new(payload: BitcoinPayload) -> Self {
