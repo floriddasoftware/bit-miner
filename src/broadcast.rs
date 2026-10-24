@@ -1,6 +1,6 @@
 use std::{
     env,
-    io::{self, Error, ErrorKind, Read, Write},
+    io::{Error, ErrorKind, Read, Write},
     net::{SocketAddr, TcpStream, UdpSocket},
     sync::{
         mpsc::{sync_channel, Receiver, SyncSender},
@@ -9,7 +9,7 @@ use std::{
     thread,
     time::Duration,
 };
-use crate::bitcoinreceipt::SettlementReceipt;
+
 use bitcoin::{
     hashes::Hash,
     OutPoint,
@@ -18,12 +18,14 @@ use bitcoin::{
 };
 
 use mio::{
-    net::{TcpListener, TcpStream as MioTcpStream},
+    net::TcpListener,
     Events,
     Interest,
     Poll,
     Token,
 };
+
+use crate::bitcoinreceipt::SettlementReceipt;
 
 // -----------------------------------------------------------------------------
 // Canonical finalized settlement
@@ -57,7 +59,6 @@ impl FinalizedSettlement {
             .as_ref()
             .map(|receipt| &receipt.script_pubkey)
     }
-    
 
     #[inline]
     pub fn wire_packets(
@@ -68,15 +69,12 @@ impl FinalizedSettlement {
             .output
             .iter()
             .enumerate()
-            .filter_map(|(index, output)| {
-                self.wire_packet(
-                    u32::try_from(index).ok()?,
-                    commitment,
-                )
+            .filter_map(|(index, _)| {
+                let vout = u32::try_from(index).ok()?;
+                self.wire_packet(vout, commitment)
             })
             .collect()
     }
-
 
     /// Constructs a packet for an existing transaction output.
     ///
@@ -109,8 +107,6 @@ impl FinalizedSettlement {
 
 // -----------------------------------------------------------------------------
 // Broadcast driver
-//
-// Retains the existing trait signature for source compatibility.
 // -----------------------------------------------------------------------------
 
 pub trait BroadcastDriver: Send + Sync + 'static {
@@ -133,7 +129,7 @@ pub trait BroadcastDriver: Send + Sync + 'static {
 //     [N bytes script_pubkey]
 //     [32 bytes commitment]
 //
-// Do not add fields to this payload without introducing a negotiated version.
+// Do not change this payload without introducing a negotiated version.
 // -----------------------------------------------------------------------------
 
 #[derive(Clone, Debug)]
@@ -147,6 +143,7 @@ pub struct WirePacket {
 impl WirePacket {
     pub const MAGIC: &'static [u8; 8] = b"QTMGSP02";
 
+    /// Fixed payload size excluding the script bytes.
     pub const MIN_SIZE: usize = 8 + 32 + 4 + 8 + 4 + 32;
 
     pub const MAX_SIZE: usize = 1_048_576;
@@ -177,26 +174,38 @@ impl WirePacket {
     }
 
     /// Stable identifier for logs and downstream indexing.
-    ///
-    /// This identifies the QTM commitment; it does not change the wire format.
+    /// This identifies the QTM commitment without changing the wire format.
     #[inline(always)]
     pub fn commitment_id(&self) -> String {
         hex::encode(self.commitment)
     }
 
+    /// Serializes the packet payload, excluding the TCP length prefix.
+    ///
+    /// Returns an empty vector if the script cannot fit in the wire format.
     #[inline(always)]
     pub fn serialize(&self) -> Vec<u8> {
         let script = self.script_pubkey.as_bytes();
 
-        let mut out = Vec::with_capacity(
-            Self::MIN_SIZE + script.len(),
-        );
+        let Some(total_size) = Self::MIN_SIZE.checked_add(script.len()) else {
+            return Vec::new();
+        };
+
+        if total_size > Self::MAX_SIZE
+            || u32::try_from(script.len()).is_err()
+        {
+            return Vec::new();
+        }
+
+        let mut out = Vec::with_capacity(total_size);
 
         out.extend_from_slice(Self::MAGIC);
         out.extend_from_slice(self.outpoint.txid.as_byte_array());
         out.extend_from_slice(&self.outpoint.vout.to_le_bytes());
         out.extend_from_slice(&self.value.to_le_bytes());
-        out.extend_from_slice(&(script.len() as u32).to_le_bytes());
+        out.extend_from_slice(
+            &(script.len() as u32).to_le_bytes(),
+        );
         out.extend_from_slice(script);
         out.extend_from_slice(&self.commitment);
 
@@ -229,30 +238,29 @@ impl WirePacket {
             ));
         }
 
-        let txid = Txid::from_slice(take(bytes, &mut offset, 32)?)
-            .map_err(|_| {
-                Error::new(ErrorKind::InvalidData, "invalid txid")
-            })?;
+        let txid = Txid::from_slice(
+            take(bytes, &mut offset, 32)?,
+        )
+        .map_err(|_| {
+            Error::new(ErrorKind::InvalidData, "invalid txid")
+        })?;
 
-        let vout = u32::from_le_bytes(take_array::<4>(
-            bytes,
-            &mut offset,
-        )?);
+        let vout = u32::from_le_bytes(
+            take_array::<4>(bytes, &mut offset)?,
+        );
 
-        let value = u64::from_le_bytes(take_array::<8>(
-            bytes,
-            &mut offset,
-        )?);
+        let value = u64::from_le_bytes(
+            take_array::<8>(bytes, &mut offset)?,
+        );
 
-        let script_len = u32::from_le_bytes(take_array::<4>(
-            bytes,
-            &mut offset,
-        )?) as usize;
+        let script_len = u32::from_le_bytes(
+            take_array::<4>(bytes, &mut offset)?,
+        ) as usize;
 
         let remaining = bytes.len().saturating_sub(offset);
 
-        // A packet must still contain its 32-byte commitment after the script.
-        if script_len > remaining.saturating_sub(32) {
+        // The packet must retain 32 bytes for the commitment.
+        if remaining < 32 || script_len > remaining - 32 {
             return Err(Error::new(
                 ErrorKind::InvalidData,
                 "script length exceeds packet boundary",
@@ -285,9 +293,6 @@ impl WirePacket {
 // Listening portal — mio TCP ingress
 //
 // BIT_MINNER_TCP_BIND=0.0.0.0:PORT
-//
-// The substrate remains the server host. This setting defines the TCP
-// listening address; it is not a QTM commitment or network identifier.
 // -----------------------------------------------------------------------------
 
 pub struct TcpReceiver;
@@ -305,7 +310,8 @@ impl TcpReceiver {
             if let Err(error) = Self::run(bind) {
                 eprintln!(
                     "tcp_receiver stopped addr={} error={}",
-                    bind, error,
+                    bind,
+                    error,
                 );
             }
         });
@@ -316,7 +322,6 @@ impl TcpReceiver {
 
         let mut poll = Poll::new()?;
         let mut events = Events::with_capacity(128);
-
         let mut listener = TcpListener::bind(bind)?;
 
         poll.registry().register(
@@ -338,39 +343,36 @@ impl TcpReceiver {
                 loop {
                     match listener.accept() {
                         Ok((mut stream, peer)) => {
-                            println!("tcp_portal=accepted peer={}", peer);
+                            println!(
+                                "tcp_portal=accepted peer={}",
+                                peer,
+                            );
 
-                            if let Err(error) = poll.registry().deregister(
-                                &mut stream,
-                            ) {
+                            if let Err(error) =
+                                poll.registry().deregister(&mut stream)
+                            {
                                 eprintln!(
-                                    "tcp_portal=deregister_failed peer={} error={}",
-                                    peer, error,
+                                    "tcp_portal=deregister_failed \
+                                     peer={} error={}",
+                                    peer,
+                                    error,
                                 );
                                 continue;
                             }
 
-                            match stream.into_std() {
-                                Ok(stream) => {
-                                    thread::spawn(move || {
-                                        if let Err(error) =
-                                            Self::receive(stream)
-                                        {
-                                            eprintln!(
-                                                "tcp_receive peer={} error={}",
-                                                peer, error,
-                                            );
-                                        }
-                                    });
-                                }
-                                Err(error) => {
+                            // Convert the deregistered mio stream into a
+                            // standard stream for blocking framed reads.
+                            let stream: TcpStream = stream.into();
+
+                            thread::spawn(move || {
+                                if let Err(error) = Self::receive(stream) {
                                     eprintln!(
-                                        "tcp_portal=stream_conversion_failed \
-                                         peer={} error={}",
-                                        peer, error,
+                                        "tcp_receive peer={} error={}",
+                                        peer,
+                                        error,
                                     );
                                 }
-                            }
+                            });
                         }
 
                         Err(error)
@@ -392,7 +394,7 @@ impl TcpReceiver {
         }
     }
 
-    fn receive(mut stream: std::net::TcpStream) -> Result<(), Error> {
+    fn receive(mut stream: TcpStream) -> Result<(), Error> {
         let peer = stream.peer_addr().ok();
 
         stream.set_nodelay(true)?;
@@ -500,8 +502,14 @@ impl BroadcastDriver for UdpGossipDriver {
     fn publish(&self, packet: &WirePacket) -> WirePacket {
         let bytes = packet.serialize();
 
-        // Bind a suitable local ephemeral port. The listener is configured
-        // independently by BIT_MINNER_TCP_BIND.
+        if bytes.is_empty() {
+            eprintln!(
+                "udp_gossip=invalid_packet commitment_id={}",
+                packet.commitment_id(),
+            );
+            return packet.clone();
+        }
+
         match UdpSocket::bind("[::]:0")
             .or_else(|_| UdpSocket::bind("0.0.0.0:0"))
         {
@@ -509,7 +517,10 @@ impl BroadcastDriver for UdpGossipDriver {
                 for peer in &self.peers {
                     if let Err(error) = socket.send_to(&bytes, peer) {
                         eprintln!(
-                            "udp_gossip=failed peer={} commitment_id={} error={}",
+                            "udp_gossip=failed \
+                             peer={} \
+                             commitment_id={} \
+                             error={}",
                             peer,
                             packet.commitment_id(),
                             error,
@@ -518,7 +529,10 @@ impl BroadcastDriver for UdpGossipDriver {
                 }
             }
             Err(error) => {
-                eprintln!("udp_gossip=socket_failed error={}", error);
+                eprintln!(
+                    "udp_gossip=socket_failed error={}",
+                    error,
+                );
             }
         }
 
@@ -547,7 +561,24 @@ impl BroadcastDriver for TcpGossipDriver {
     #[inline(always)]
     fn publish(&self, packet: &WirePacket) -> WirePacket {
         let bytes = packet.serialize();
-        let length = (bytes.len() as u32).to_be_bytes();
+
+        if bytes.is_empty() {
+            eprintln!(
+                "tcp_gossip=invalid_packet commitment_id={}",
+                packet.commitment_id(),
+            );
+            return packet.clone();
+        }
+
+        let Ok(length) = u32::try_from(bytes.len()) else {
+            eprintln!(
+                "tcp_gossip=frame_too_large commitment_id={}",
+                packet.commitment_id(),
+            );
+            return packet.clone();
+        };
+
+        let length = length.to_be_bytes();
 
         for peer in &self.peers {
             match TcpStream::connect_timeout(
@@ -558,7 +589,8 @@ impl BroadcastDriver for TcpGossipDriver {
                     if let Err(error) = stream.set_nodelay(true) {
                         eprintln!(
                             "tcp_gossip=failed peer={} error={}",
-                            peer, error,
+                            peer,
+                            error,
                         );
                         continue;
                     }
@@ -587,7 +619,8 @@ impl BroadcastDriver for TcpGossipDriver {
                 Err(error) => {
                     eprintln!(
                         "tcp_gossip=unreachable peer={} error={}",
-                        peer, error,
+                        peer,
+                        error,
                     );
                 }
             }
@@ -641,9 +674,7 @@ impl Broadcaster {
 
             while let Ok(packet) = rx.recv() {
                 for driver in &drivers {
-                    // The legacy trait returns WirePacket rather than Result.
-                    // Keep the return value for compatibility; the packet is
-                    // the same canonical object for every driver.
+                    // Keep the legacy trait signature for compatibility.
                     let _ = driver.publish(&packet);
                 }
             }
@@ -656,8 +687,8 @@ impl Broadcaster {
 
     /// Preserves the existing signature and return value.
     ///
-    /// Uses blocking send rather than try_send so a temporarily full queue
-    /// applies backpressure instead of dropping or immediately panicking.
+    /// Blocking send applies backpressure instead of silently dropping a
+    /// packet when the queue is full.
     #[inline(always)]
     pub fn publish(&self, packet: WirePacket) -> WirePacket {
         self.queue
@@ -679,7 +710,11 @@ fn short_hex(bytes: &[u8]) -> String {
     if full.len() <= 16 {
         full
     } else {
-        format!("{}...{}", &full[..8], &full[full.len() - 8..])
+        format!(
+            "{}...{}",
+            &full[..8],
+            &full[full.len() - 8..],
+        )
     }
 }
 
@@ -690,7 +725,10 @@ fn take<'a>(
     len: usize,
 ) -> Result<&'a [u8], Error> {
     let end = offset.checked_add(len).ok_or_else(|| {
-        Error::new(ErrorKind::InvalidData, "packet offset overflow")
+        Error::new(
+            ErrorKind::InvalidData,
+            "packet offset overflow",
+        )
     })?;
 
     if end > bytes.len() {
