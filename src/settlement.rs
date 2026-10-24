@@ -31,25 +31,26 @@ pub struct SettlementEngine;
 
 impl SettlementEngine {
     #[inline(always)]
-    fn settle(receipt: EventReceipt) -> SettlementReceipt {
-        let EventReceipt {
-            event,
-            locked,
-            ..
-        } = receipt;
+fn settle(
+    receipt: EventReceipt,
+) -> Result<SettlementReceipt, SettlementError> {
+    let EventReceipt {
+        event,
+        locked,
+        ..
+    } = receipt;
 
-        let script_pubkey =
-            crate::bit_block::derive_script_pubkey(
-                &event.qtm.coordinate,
-            );
+    let script_pubkey =
+        crate::bit_block::derive_script_pubkey(event.qtm.coordinate)
+            .map_err(|error| SettlementError::Backend(error.to_string()))?;
 
-        SettlementReceipt::new(
-            Self::balance(event),
-            SettlementState::Success,
-            locked,
-            script_pubkey,
-        )
-    }
+    Ok(SettlementReceipt::new(
+        Self::balance(event),
+        SettlementState::Success,
+        locked,
+        script_pubkey,
+    ))
+}
 
     #[inline(always)]
     pub fn balance(event: QP44Event) -> PQ44Event {
