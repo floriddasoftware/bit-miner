@@ -69,12 +69,12 @@ fn settle(
     }
 
     #[inline(always)]
-    pub fn evict(
-        &self,
-        receipt: EventReceipt,
-    ) -> SettlementReceipt {
-        Self::settle(receipt)
-    }
+pub fn evict(
+    &self,
+    receipt: EventReceipt,
+) -> Result<SettlementReceipt, SettlementError> {
+    Self::settle(receipt)
+}
 
     #[inline(always)]
     pub fn new(
@@ -117,7 +117,7 @@ pub fn process(
     bitcoin: BitcoinPayload,
     observed: ObservedBitcoinTransaction,
 ) -> Result<FinalizedSettlement, SettlementError> {
-    let receipt = Self::settle(receipt);
+    let receipt = Self::settle(receipt)?;
 
     let transaction = Self::materialize(
         &receipt,
@@ -125,10 +125,7 @@ pub fn process(
         observed,
     )?;
 
-    Ok(FinalizedSettlement::new(
-        Some(receipt),
-        transaction,
-    ))
+    Ok(FinalizedSettlement::new(Some(receipt), transaction))
 }
 
 #[inline(always)]
@@ -150,18 +147,13 @@ pub fn proceed(
     ))
 }
 
-    #[inline(always)]
-    pub fn coinbase(
-        &self,
-        transaction: Transaction,
-    ) -> FinalizedSettlement {
-        FinalizedSettlement::new(
-            None,
-            transaction.clone(),
-            transaction,
-            0,
-        )
-    }
+      #[inline(always)]
+pub fn coinbase(
+    &self,
+    transaction: Transaction,
+) -> FinalizedSettlement {
+    FinalizedSettlement::new(None, transaction)
+}
 
     #[inline(always)]
     fn materialize(
