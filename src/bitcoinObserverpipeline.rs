@@ -18,6 +18,12 @@ pub struct BitcoinObservationPipeline {
     chain: ChainStateManager,
     schedule: Option<BitcoinSchedule>,
 }
+pub struct BitcoinObservationPipeline {
+    utxo: BitcoinUTXOCollector,
+    pub miner: Miner,
+    chain: ChainStateManager,
+    schedule: Option<BitcoinSchedule>,
+}
 
 impl BitcoinObservationPipeline {
     #[inline(always)]
@@ -70,28 +76,19 @@ impl BitcoinObservationPipeline {
     pub fn process(
         &mut self,
         substrate: &str,
+        manifold: &quantom_value::QuantPerm,
         observed: ObservedBitcoinTransaction,
     ) -> Result<
         Option<(FinalizedSettlement, Vec<Retain>)>,
         SettlementError,
     > {
-        let (event, _cascade) = self.miner.submit(substrate);
-
-        let event_receipt = EventReceipt::new(
-            event,
-            SettlementState::Pending,
-        );
-
-        let (bitcoin, retained) = self.bitcoin_payload(
-            &observed,
-            &event_receipt,
-        )?;
+        let (bitcoin, retained) =
+            self.bitcoin_payload(&observed, manifold)?;
 
         self.advance_materialized(
             substrate,
             bitcoin,
             retained,
-            event_receipt,
             observed,
         )
     }
@@ -100,12 +97,12 @@ impl BitcoinObservationPipeline {
     pub fn bitcoin_payload(
         &mut self,
         observed: &ObservedBitcoinTransaction,
-        event: &EventReceipt,
+        manifold: &quantom_value::QuantPerm,
     ) -> Result<
         (BitcoinPayload, Vec<Retain>),
         SettlementError,
     > {
-        self.utxo.collect(observed, event)
+        self.utxo.collect(observed, manifold)
     }
 
     #[inline(always)]
@@ -114,7 +111,6 @@ impl BitcoinObservationPipeline {
         substrate: &str,
         bitcoin: BitcoinPayload,
         mut retained: Vec<Retain>,
-        event: EventReceipt,
         observed: ObservedBitcoinTransaction,
     ) -> Result<
         Option<(FinalizedSettlement, Vec<Retain>)>,
@@ -124,23 +120,9 @@ impl BitcoinObservationPipeline {
             return Ok(None);
         };
 
-        let manifold = &event.event.heritage.state;
-        let payload_activation = manifold.activations();
+        let payload_activation = self.utxo.activation();
 
         if tip_height <= payload_activation {
-            return Ok(None);
-        }
-
-        let Some(clip) = self
-            .miner
-            .clips()
-            .iter()
-            .find(|clip| clip.substrate == substrate)
-        else {
-            return Ok(None);
-        };
-
-        if clip.activation == payload_activation {
             return Ok(None);
         }
 
@@ -154,7 +136,6 @@ impl BitcoinObservationPipeline {
 
         let (finalized, settlement_retained) =
             SettlementEngine::new(substrate).process(
-                event,
                 bitcoin,
                 observed,
             )?;
