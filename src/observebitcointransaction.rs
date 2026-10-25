@@ -74,46 +74,51 @@ pub fn new_transact(
     source: BitcoinObservationSource,
 ) -> ObservationResult<Self> {
     let coordinate = Qtm::derive_coordinate(manifold);
-    let script =
-        crate::bit_block::derive_script_pubkey(coordinate)?;
+
     let fee = u64::try_from(payload.fee_mass(manifold))
         .unwrap_or(u64::MAX);
+
     if let Some(output) = payload.outputs.last_mut() {
         output.value = output.value.saturating_sub(fee);
     }
-    // This constructs an unsigned transaction template. The scriptSig
-    // and witness remain empty until the transaction is actually signed.
-    let inputs = payload
-        .inputs
-        .into_iter()
-        .map(|input| bitcoin::TxIn {
-            previous_output: input.previous_output,
-            script_sig: bitcoin::ScriptBuf::new(),
-            sequence: bitcoin::Sequence::MAX,
-            witness: bitcoin::Witness::new(),
-        })
-        .collect();
-    // Apply the derived locking script to outputs created by this
-    // constructor. The source payload's output scripts are intentionally
-    // replaced here.
+
+    for output in &mut payload.outputs {
+        output.assign(manifold, coordinate)?;
+    }
+
     let outputs = payload
         .outputs
         .into_iter()
         .map(|output| bitcoin::TxOut {
             value: bitcoin::Amount::from_sat(output.value),
-            script_pubkey: script.clone(),
+            script_pubkey: output.script_pubkey,
         })
         .collect();
+
+    let inputs = payload
+        .inputs
+        .into_iter()
+        .map(|input| bitcoin::TxIn {
+            previous_output: input.previous_output,
+            script_sig: input.script_sig,
+            sequence: input.sequence,
+            witness: input.witness,
+        })
+        .collect();
+
     let transaction = bitcoin::Transaction {
         version: bitcoin::transaction::Version(1),
         lock_time: bitcoin::absolute::LockTime::ZERO,
         input: inputs,
         output: outputs,
     };
+
     let mut observed = Self::from_transaction(transaction, source);
     observed.fee = Some(fee);
+
     Ok(observed)
 }
+
 #[inline(always)]
 pub fn new_transaction(
     manifold: &QuantPerm,
@@ -121,6 +126,4 @@ pub fn new_transaction(
     source: BitcoinObservationSource,
 ) -> ObservationResult<Self> {
     Self::new_transact(manifold, payload, source)
-}
-
 }
