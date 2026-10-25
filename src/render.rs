@@ -11,11 +11,8 @@ pub struct RenderState {
 }
 
 impl RenderState {
-
     #[inline(always)]
-    pub fn window(
-        substrate: String,
-    ) -> Self {
+    pub fn window(substrate: String) -> Self {
         Self {
             substrate,
             active: true,
@@ -29,14 +26,9 @@ impl RenderState {
         heritage: Heritage,
         scale: Scale,
     ) {
-        self.direction =
-            Some(
-                Direction::new(
-                    heritage,
-                    scale,
-                )
-            );
-
+        self.direction = Some(Direction::new(heritage, scale));
         self.active = true;
     }
 }
+
+pub type ChainStateManager = RenderState;
