@@ -12,6 +12,11 @@ use crate::{
     settlement::{SettlementEngine, SettlementError},
 };
 
+use crate::render::{
+    ChainStateManager,
+    RenderState,
+};
+
 pub struct BitcoinObservationPipeline {
     utxo: BitcoinUTXOCollector,
     pub miner: Miner,
