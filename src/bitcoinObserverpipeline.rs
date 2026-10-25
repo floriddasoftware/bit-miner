@@ -36,7 +36,7 @@ impl BitcoinObservationPipeline {
                 activation,
             )?,
             miner: Miner::new(activation.saturating_sub(1)),
-            chain: ChainStateManager::new(),
+            chain: RenderState::window(substrate.to_owned()),
             schedule: None,
         })
     }
