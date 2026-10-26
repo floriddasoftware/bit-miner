@@ -164,15 +164,11 @@ let event_receipt =
             )));
         }
 
-        let (finalized, settlement_retained) =
-            SettlementEngine::new(substrate).process(
-                event,
-                bitcoin,
-                observed,
-            )?;
+       let finalized = SettlementEngine::new(substrate).process(
+    event,
+    bitcoin,
+    observed,
+)?;
 
-        retained.extend(settlement_retained);
-
-        Ok(Some((finalized, retained)))
-    }
+Ok(Some((finalized, retained)))
 }
