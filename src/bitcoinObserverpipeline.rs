@@ -110,6 +110,14 @@ impl BitcoinObservationPipeline {
                 ));
             }
         };
+        
+        let locked = qp_hd::protocol_id::LockedStructure {
+    dimension: event.heritage.state.dimension(),
+    structural_value: event.heritage.state.structural_value(),
+};
+
+let event_receipt =
+    EventReceipt::new(event, SettlementState::Pending, locked)?;
 
         let (bitcoin, retained) =
             self.bitcoin_payload(&observed, &event.heritage.state)?;
