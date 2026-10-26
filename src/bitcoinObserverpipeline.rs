@@ -27,16 +27,15 @@ pub struct BitcoinObservationPipeline {
 impl BitcoinObservationPipeline {
     #[inline(always)]
     pub fn new(
-        activation: u64,
-        substrate: &str,
-    ) -> Result<Self, SettlementError> {
-        Ok(Self {
-            utxo: BitcoinUTXOCollector::new(substrate, activation)?,
-            miner: Miner::new(activation.saturating_sub(1)),
-            chain: RenderState::window(substrate.to_owned()),
-            schedule: None,
-        })
-    }
+    activation: u64,
+    substrate: &str,
+) -> Result<Self, SettlementError> {
+    Ok(Self {
+        utxo: BitcoinUTXOCollector::new(BitcoinPayload::new()),
+        miner: Miner::new(activation.saturating_sub(1)),
+        chain: RenderState::window(substrate.to_owned()),
+    })
+}
 
     #[inline(always)]
     pub fn miner_mut(&mut self) -> &mut Miner {
