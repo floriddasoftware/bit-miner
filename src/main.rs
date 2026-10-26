@@ -57,8 +57,6 @@ fn main() {
 
 use std::path::PathBuf;
 
-use bit_minner::BitcoinObservationPipeline;
-
 use qp_hd::commands::{
     load_event_at_activation,
     qtm_open_manifold_until,
