@@ -80,19 +80,6 @@ Self::Payload
 }
 }
 
-impl BitcoinPayload {
-#[inline(always)]
-pub fn new(
-inputs: Vec,
-outputs: Vec,
-) -> Self {
-Self {
-addresses: Vec::new(),
-inputs,
-outputs,
-payload_type: PayloadType::Payload,
-}
-}
 
 #[inline(always)]
 pub fn from_address(address: impl Into<String>) -> Self {
