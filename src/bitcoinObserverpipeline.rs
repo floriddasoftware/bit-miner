@@ -58,15 +58,6 @@ impl BitcoinObservationPipeline {
         &mut self.chain
     }
 
-    #[inline(always)]
-    pub fn schedule(&self) -> Option<BitcoinSchedule> {
-        self.schedule.clone()
-    }
-
-    #[inline(always)]
-    pub fn update_schedule(&mut self, schedule: BitcoinSchedule) {
-        self.schedule = Some(schedule);
-    }
 
     #[inline(always)]
     pub fn process(
