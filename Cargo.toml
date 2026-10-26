@@ -23,3 +23,7 @@ mio = { version = "1", features = ["net", "os-poll"] }
 qp-hd = { git = "https://github.com/floriddasoftware/QTM" }
 qtm-graph = { git = "https://github.com/floriddasoftware/Quantum-Economies" }
 quantom_value = { git = "https://github.com/QuantPerm-Labs/Quantom-VALUE" }
+futures-util = "0.3"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "net", "time"] }
+tokio-tungstenite = { version = "0.26", features = ["connect", "rustls-tls-webpki-roots"] }
