@@ -27,7 +27,7 @@ impl BitcoinObservationPipeline {
         substrate: &str,
     ) -> Result<Self, SettlementError> {
         Ok(Self {
-            utxo: BitcoinUTXOCollector::new(BitcoinPayload::new()),
+            utxo: BitcoinUTXOCollector::new(),
             miner: Miner::new(activation.saturating_sub(1)),
             chain: RenderState::window(substrate.to_owned()),
         })
