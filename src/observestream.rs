@@ -1,8 +1,14 @@
 
-use std::error::Error;
+use std::{
+    collections::{HashSet, VecDeque},
+    error::Error,
+    str::FromStr,
+};
 
-use futures_util::{SinkExt, StreamExt};
+use bitcoin::{consensus::Decodable, Txid};
+use futures_util::{stream, SinkExt, StreamExt};
 use qp_hd::pathsregistry::CoinType;
+use quantom_value::Retain;
 use serde_json::Value;
 use tokio::net::TcpStream;
 use tokio_tungstenite::{
@@ -12,13 +18,25 @@ use tokio_tungstenite::{
     WebSocketStream,
 };
 
+use crate::{
+    observebitcointransaction::ObservedBitcoinTransaction,
+    settlement::{FinalizedSettlement, SettlementError},
+    BitcoinObservationPipeline,
+};
+
 pub type Blockchain = CoinType;
 
 pub type ObservationResult<T> =
     Result<T, Box<dyn Error + Send + Sync>>;
 
+pub type PipelineOutcome =
+    Result<Option<(FinalizedSettlement, Vec<Retain>)>, SettlementError>;
+
 const MEMPOOL_SPACE_WS: &str = "wss://mempool.space/api/v1/ws";
 const MEMPOOL_SPACE_API: &str = "https://mempool.space/api";
+
+const FETCH_CONCURRENCY: usize = 8;
+const CHANNEL_CAPACITY: usize = 4096;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum BlockchainStream {
@@ -70,6 +88,9 @@ pub struct MempoolSpaceStream {
     client: reqwest::Client,
     source: BitcoinObservationSource,
     mode: MempoolStreamMode,
+    pending: VecDeque<BitcoinObservation>,
+    track_blocks: bool,
+    skipped: u64,
 }
 
 impl MempoolSpaceStream {
@@ -79,33 +100,22 @@ impl MempoolSpaceStream {
     ) -> ObservationResult<Self> {
         let (mut socket, _) = connect_async(MEMPOOL_SPACE_WS).await?;
 
-        let mempool_subscription = match mode {
+        let subscription = match mode {
             MempoolStreamMode::TransactionIds => {
-                serde_json::json!({
-                    "track-mempool-txids": true
-                })
+                r#"{"track-mempool-txids":true}"#
             }
             MempoolStreamMode::FullTransactions => {
-                serde_json::json!({
-                    "track-mempool": true
-                })
+                r#"{"track-mempool":true}"#
             }
         };
 
         socket
-            .send(Message::Text(
-                mempool_subscription.to_string().into(),
-            ))
+            .send(Message::Text(subscription.into()))
             .await?;
 
         socket
             .send(Message::Text(
-                serde_json::json!({
-                    "action": "want",
-                    "data": ["blocks"]
-                })
-                .to_string()
-                .into(),
+                r#"{"action":"want","data":["blocks"]}"#.into(),
             ))
             .await?;
 
@@ -114,6 +124,9 @@ impl MempoolSpaceStream {
             client: reqwest::Client::new(),
             source: BitcoinObservationSource::mempool_space(activation),
             mode,
+            pending: VecDeque::new(),
+            track_blocks: true,
+            skipped: 0,
         })
     }
 
@@ -127,131 +140,235 @@ impl MempoolSpaceStream {
         self.mode
     }
 
+    #[inline(always)]
+    pub const fn skipped(&self) -> u64 {
+        self.skipped
+    }
+
     pub async fn next_observation(
         &mut self,
     ) -> ObservationResult<BitcoinObservation> {
         loop {
-            let message = self
-                .socket
-                .next()
-                .await
-                .ok_or("Mempool.space WebSocket closed")??;
-
-            let text = match message {
-                Message::Text(text) => text.to_string(),
-                Message::Binary(bytes) => {
-                    String::from_utf8(bytes.to_vec())?
-                }
-                Message::Close(_) => {
-                    return Err(
-                        "Mempool.space WebSocket closed".into()
-                    );
-                }
-                Message::Ping(_) | Message::Pong(_) | Message::Frame(_) => {
-                    continue;
-                }
-            };
-
-            let value: Value = serde_json::from_str(&text)?;
-
-            if let Some(transaction) = full_transaction(&value)? {
-                return Ok(BitcoinObservation::Transaction(transaction));
+            if let Some(observation) = self.pending.pop_front() {
+                return Ok(observation);
             }
 
-            if let Some(txid) = transaction_id(&value) {
-                let url = format!("{MEMPOOL_SPACE_API}/tx/{txid}/raw");
-                let raw = self
-                    .client
-                    .get(url)
-                    .send()
-                    .await?
-                    .error_for_status()?
-                    .bytes()
-                    .await?;
+            self.fill().await?;
+        }
+    }
 
-                let transaction =
-                    bitcoin::consensus::deserialize::<bitcoin::Transaction>(
-                        &raw,
-                    )?;
+    /// Reads the network stream independently and sends wrapped transactions
+    /// to the existing pipeline through a bounded queue.
+    pub async fn stream<F>(
+        mut self,
+        substrate: &str,
+        pipeline: &mut BitcoinObservationPipeline,
+        mut sink: F,
+    ) -> ObservationResult<()>
+    where
+        F: FnMut(Txid, PipelineOutcome),
+    {
+        self.track_blocks = false;
 
-                return Ok(BitcoinObservation::Transaction(transaction));
+        let source = self.source;
+        let (sender, mut receiver) =
+            tokio::sync::mpsc::channel::<ObservedBitcoinTransaction>(
+                CHANNEL_CAPACITY,
+            );
+
+        let reader = tokio::spawn(async move {
+            loop {
+                match self.next_observation().await? {
+                    BitcoinObservation::Transaction(transaction) => {
+                        let observed =
+                            ObservedBitcoinTransaction::from_transaction(
+                                transaction,
+                                source,
+                            );
+
+                        if sender.send(observed).await.is_err() {
+                            return Ok(());
+                        }
+                    }
+                    BitcoinObservation::Block(_) => {}
+                }
             }
 
-            if let Some(hash) = block_hash(&value) {
-                let url = format!("{MEMPOOL_SPACE_API}/block/{hash}/raw");
-                let raw = self
-                    .client
-                    .get(url)
-                    .send()
-                    .await?
-                    .error_for_status()?
-                    .bytes()
-                    .await?;
+            #[allow(unreachable_code)]
+            Ok::<(), Box<dyn Error + Send + Sync>>(())
+        });
 
-                let block =
-                    bitcoin::consensus::deserialize::<bitcoin::Block>(
-                        &raw,
-                    )?;
+        while let Some(observed) = receiver.recv().await {
+            let txid = observed.txid;
+            let outcome = pipeline.process(substrate, observed);
+            sink(txid, outcome);
+        }
 
-                return Ok(BitcoinObservation::Block(block));
+        match reader.await {
+            Ok(result) => result,
+            Err(error) => Err(Box::new(error)),
+        }
+    }
+
+    async fn fill(&mut self) -> ObservationResult<()> {
+        let message = self
+            .socket
+            .next()
+            .await
+            .ok_or("Mempool.space WebSocket closed")??;
+
+        let value: Value = match message {
+            Message::Text(text) => serde_json::from_str(text.as_ref())?,
+            Message::Binary(bytes) => serde_json::from_slice(&bytes)?,
+            Message::Close(_) => {
+                return Err("Mempool.space WebSocket closed".into());
+            }
+            Message::Ping(_) | Message::Pong(_) | Message::Frame(_) => {
+                return Ok(());
+            }
+        };
+
+        self.decode(&value).await
+    }
+
+    async fn decode(&mut self, value: &Value) -> ObservationResult<()> {
+        let mut ids = Vec::<String>::new();
+        let mut seen = HashSet::<String>::new();
+
+        if let Some(entries) = added(value, "mempool-transactions") {
+            for entry in entries {
+                let txid = entry
+                    .get("txid")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
+
+                if let Some(hex_tx) =
+                    entry.get("hex").and_then(Value::as_str)
+                {
+                    match decode_hex_transaction(hex_tx) {
+                        Ok(transaction) => {
+                            self.pending.push_back(
+                                BitcoinObservation::Transaction(transaction),
+                            );
+                            continue;
+                        }
+                        Err(_) => {
+                            self.skipped = self.skipped.saturating_add(1);
+                        }
+                    }
+                }
+
+                if let Some(txid) = txid {
+                    if seen.insert(txid.clone()) {
+                        ids.push(txid);
+                    }
+                }
             }
         }
+
+        if let Some(entries) = added(value, "mempool-txids") {
+            for txid in entries.iter().filter_map(Value::as_str) {
+                if seen.insert(txid.to_owned()) {
+                    ids.push(txid.to_owned());
+                }
+            }
+        }
+
+        if let Some(txid) = value.get("txid").and_then(Value::as_str) {
+            if seen.insert(txid.to_owned()) {
+                ids.push(txid.to_owned());
+            }
+        }
+
+        if !ids.is_empty() {
+            let client = self.client.clone();
+
+            let mut fetched = stream::iter(ids)
+                .map(move |txid| {
+                    let client = client.clone();
+
+                    async move {
+                        let txid = Txid::from_str(&txid)?;
+                        fetch_decode::<bitcoin::Transaction>(
+                            &client,
+                            format!("{MEMPOOL_SPACE_API}/tx/{txid}/raw"),
+                        )
+                        .await
+                    }
+                })
+                .buffered(FETCH_CONCURRENCY);
+
+            while let Some(result) = fetched.next().await {
+                match result {
+                    Ok(transaction) => {
+                        self.pending.push_back(
+                            BitcoinObservation::Transaction(transaction),
+                        );
+                    }
+                    Err(_) => {
+                        self.skipped = self.skipped.saturating_add(1);
+                    }
+                }
+            }
+        }
+
+        if self.track_blocks {
+            if let Some(hash) = block_hash(value) {
+                match fetch_decode::<bitcoin::Block>(
+                    &self.client,
+                    format!("{MEMPOOL_SPACE_API}/block/{hash}/raw"),
+                )
+                .await
+                {
+                    Ok(block) => {
+                        self.pending.push_back(BitcoinObservation::Block(block));
+                    }
+                    Err(_) => {
+                        self.skipped = self.skipped.saturating_add(1);
+                    }
+                }
+            }
+        }
+
+        Ok(())
     }
 }
 
-fn full_transaction(
-    value: &Value,
-) -> ObservationResult<Option<bitcoin::Transaction>> {
-    let Some(added) = value
-        .get("mempool-transactions")
-        .and_then(|mempool| mempool.get("added"))
-        .and_then(Value::as_array)
-    else {
-        return Ok(None);
-    };
-
-    let Some(tx) = added.first() else {
-        return Ok(None);
-    };
-
-    let Some(hex_tx) = tx
-        .get("hex")
-        .and_then(Value::as_str)
-    else {
-        return Ok(None);
-    };
-
-    let raw = hex::decode(hex_tx)?;
-    let transaction =
-        bitcoin::consensus::deserialize::<bitcoin::Transaction>(&raw)?;
-
-    Ok(Some(transaction))
+#[inline(always)]
+fn added<'a>(value: &'a Value, key: &str) -> Option<&'a Vec<Value>> {
+    value.get(key)?.get("added")?.as_array()
 }
 
-fn transaction_id(value: &Value) -> Option<&str> {
-    let mempool = value.get("mempool-txids")?;
+#[inline(always)]
+fn decode_hex_transaction(
+    hex_tx: &str,
+) -> ObservationResult<bitcoin::Transaction> {
+    let raw = hex::decode(hex_tx)?;
+    Ok(bitcoin::consensus::deserialize::<bitcoin::Transaction>(&raw)?)
+}
 
-    mempool
-        .get("added")
-        .and_then(Value::as_array)
-        .and_then(|items| items.iter().find_map(Value::as_str))
-        .or_else(|| {
-            value
-                .get("txid")
-                .and_then(Value::as_str)
-        })
+async fn fetch_decode<T: Decodable>(
+    client: &reqwest::Client,
+    url: String,
+) -> ObservationResult<T> {
+    let raw = client
+        .get(url)
+        .send()
+        .await?
+        .error_for_status()?
+        .bytes()
+        .await?;
+
+    Ok(bitcoin::consensus::deserialize::<T>(&raw)?)
 }
 
 fn block_hash(value: &Value) -> Option<&str> {
-    value
-        .get("block")
+    let block = value.get("block");
+
+    block
         .and_then(|block| block.get("id"))
         .and_then(Value::as_str)
-        .or_else(|| {
-            value
-                .get("block")
-                .and_then(Value::as_str)
-        })
+        .or_else(|| block.and_then(Value::as_str))
         .or_else(|| {
             value
                 .get("blocks")
