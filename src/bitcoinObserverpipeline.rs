@@ -9,16 +9,13 @@ use quantom_value::{QuantPerm, Retain};
 use crate::{
     bitcoinpayload::BitcoinPayload,
     bitcoinutxocollector::BitcoinUTXOCollector,
+    broadcast::FinalizedSettlement,
     miner::Miner,
     observebitcointransaction::ObservedBitcoinTransaction,
     qpeventreceipt::EventReceipt,
     render::RenderState,
-    settlement::{
-        FinalizedSettlement,
-        SettlementEngine,
-        SettlementError,
-        SettlementState,
-    },
+    settlement::{SettlementEngine, SettlementError},
+    sharedtypes::SettlementState,
 };
 
 pub struct BitcoinObservationPipeline {
