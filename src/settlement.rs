@@ -155,45 +155,48 @@ pub fn coinbase(
     FinalizedSettlement::new(None, transaction)
 }
 
-    #[inline(always)]
-    fn materialize(
-        receipt: &SettlementReceipt,
-        bitcoin: BitcoinPayload,
-        observed: ObservedBitcoinTransaction,
-    ) -> Result<Transaction, SettlementError> {
-        match receipt.state {
-            SettlementState::Success => {}
-            SettlementState::Pending => {
-                return Err(SettlementError::Unsupported(
-                    "cannot materialize a pending settlement",
-                ));
-            }
-            SettlementState::Failed => {
-                return Err(SettlementError::Unsupported(
-                    "cannot materialize a failed settlement",
-                ));
-            }
-        }
-
-        if bitcoin.outputs.is_empty() {
+   #[inline(always)]
+fn materialize(
+    receipt: &SettlementReceipt,
+    bitcoin: BitcoinPayload,
+    observed: ObservedBitcoinTransaction,
+) -> Result<Transaction, SettlementError> {
+    match receipt.state {
+        SettlementState::Success => {}
+        SettlementState::Pending => {
             return Err(SettlementError::Unsupported(
-                "cannot materialize a transaction without outputs",
+                "cannot materialize a pending settlement",
             ));
         }
-
-        if bitcoin.inputs.is_empty() {
+        SettlementState::Failed => {
             return Err(SettlementError::Unsupported(
-                "cannot materialize a transaction without inputs",
+                "cannot materialize a failed settlement",
             ));
         }
-
-        Ok(
-            ObservedBitcoinTransaction::new_transact(
-                &receipt.event.heritage.state,
-                bitcoin,
-                observed.source,
-            )
-            .transaction,
-        )
     }
+
+    if bitcoin.outputs.is_empty() {
+        return Err(SettlementError::Unsupported(
+            "cannot materialize a transaction without outputs",
+        ));
+    }
+
+    if bitcoin.inputs.is_empty() {
+        return Err(SettlementError::Unsupported(
+            "cannot materialize a transaction without inputs",
+        ));
+    }
+
+    let observed_transaction =
+        ObservedBitcoinTransaction::new_transact(
+            &receipt.event.heritage.state,
+            bitcoin,
+            observed.source,
+        )
+        .map_err(|error| {
+            SettlementError::Backend(error.to_string())
+        })?;
+
+    Ok(observed_transaction.transaction)
+}
 }
