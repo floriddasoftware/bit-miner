@@ -19,22 +19,40 @@ impl Miner {
     #[inline(always)]
     pub fn new(activation: u64) -> Self {
         let broadcaster = Broadcaster::init();
-        let substrates = Substrate::discover(activation);
+
+        let substrate = substrate_root()
+            .read_dir()
+            .expect("Failed to read substrate root")
+            .filter_map(Result::ok)
+            .filter(|entry| entry.path().is_dir())
+            .find_map(|entry| {
+                let path = entry.path();
+                let activation_path = path.join("activation");
+
+                let active_activation = std::fs::read_to_string(activation_path)
+                    .ok()?
+                    .trim()
+                    .parse::<u64>()
+                    .ok()?;
+
+                if active_activation == activation {
+                    Some(ActiveClip {
+                        substrate: entry.file_name().to_string_lossy().into_owned(),
+                        activation: active_activation,
+                    })
+                } else {
+                    None
+                }
+            });
+
+        let clips = substrate.into_iter().collect::<Vec<_>>();
 
         assert!(
-            !substrates.is_empty(),
-            "No substrates discovered."
+            !clips.is_empty(),
+            "No active clip found for activation {activation}."
         );
 
-        println!("⚡ Miner online substrates={}", substrates.len());
-
-        let clips = substrates
-            .into_iter()
-            .map(|substrate| ActiveClip {
-                substrate: substrate.lab,
-                activation: substrate.activation,
-            })
-            .collect();
+        println!("⚡ Miner online active_clips={}", clips.len());
 
         Self {
             clips,
@@ -68,7 +86,7 @@ impl Miner {
             )
         })?;
 
-        let root = substrate_root().join(substrate);
+        let root = substrate_root().join(&clip.substrate);
         let events = root.join("events");
 
         if !events.is_dir() {
