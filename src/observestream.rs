@@ -19,8 +19,9 @@ use tokio_tungstenite::{
 };
 
 use crate::{
+    broadcast::FinalizedSettlement,
     observebitcointransaction::ObservedBitcoinTransaction,
-    settlement::{FinalizedSettlement, SettlementError},
+    settlement::SettlementError,
     BitcoinObservationPipeline,
 };
 
