@@ -22,7 +22,6 @@ pub struct BitcoinObservationPipeline {
     utxo: BitcoinUTXOCollector,
     pub miner: Miner,
     chain: RenderState,
-    schedule: Option<BitcoinSchedule>,
 }
 
 impl BitcoinObservationPipeline {
