@@ -74,46 +74,60 @@ impl Miner {
     }
 
     #[inline(always)]
-    pub fn submit(
-        &mut self,
-        substrate: &str,
-        realized: u128,
-    ) -> Result<PathBuf, std::io::Error> {
-        let clip = self.clip(substrate).ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                format!("active clip not found: {substrate}"),
-            )
-        })?;
+pub fn submit(
+    &mut self,
+    substrate: &str,
+    realized: u128,
+) -> Result<PathBuf, std::io::Error> {
+    let clip = self.clip(substrate).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("active clip not found: {substrate}"),
+        )
+    })?;
 
-        let root = substrate_root().join(&clip.substrate);
-        let events = root.join("events");
+    let budget = qp_hd::commands::load_budget(&clip.substrate)?;
 
-        if !events.is_dir() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                format!("event store not found: {}", events.display()),
-            ));
-        }
-
-        let event_path = events.join(format!(
-            "event_{}_{}",
-            clip.activation,
-            realized,
+    if self.submissions as u64 >= budget.max_events {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!(
+                "submission budget exhausted: substrate={} submissions={} max_events={}",
+                clip.substrate,
+                self.submissions,
+                budget.max_events,
+            ),
         ));
+    }
 
-        if !event_path.exists() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                format!(
-                    "stored event not found: {}",
-                    event_path.display()
-                ),
-            ));
-        }
+    let root = substrate_root().join(&clip.substrate);
+    let events = root.join("events");
 
-        self.submissions = self.submissions.saturating_add(1);
+    if !events.is_dir() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("event store not found: {}", events.display()),
+        ));
+    }
 
-        Ok(event_path)
+    let event_path = events.join(format!(
+        "event_{}_{}",
+        clip.activation,
+        realized,
+    ));
+
+    if !event_path.exists() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!(
+                "stored event not found: {}",
+                event_path.display()
+            ),
+        ));
+    }
+
+    self.submissions = self.submissions.saturating_add(1);
+
+    Ok(event_path)
     }
 }
