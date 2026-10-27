@@ -1,14 +1,15 @@
 use std::env;
+use std::path::PathBuf;
 
 use bit_minner::{
     BitcoinObservationPipeline,
-    Miner,
     RenderState,
 };
 
-use qp_hd::{
+use qp_hd::commands::{
+    load_event_at_activation,
+    qtm_open_manifold_until,
     PersistedEvent,
-    QP44Event,
 };
 
 fn main() {
@@ -23,45 +24,33 @@ fn main() {
     let substrate = args
         .get(2)
         .expect("missing substrate")
-        .as_str();
+        .clone();
 
     let mut pipeline = BitcoinObservationPipeline::new(
         activation,
-        substrate,
+        &substrate,
     )
     .expect("failed to initialize Bitcoin observation pipeline");
 
     let mut windows = Vec::new();
 
     for clip in pipeline.miner().clips() {
-        windows.push(
-            RenderState::window(
-                clip.substrate.clone(),
-            ),
-        );
+        windows.push(RenderState::window(
+            clip.substrate.clone(),
+        ));
     }
 
     loop {
         for window in &mut windows {
-            let substrate = window.substrate.as_str();
+            let substrate = window.substrate.clone();
 
-            let persisted = refresh(
+            let _ = refresh(
                 &mut pipeline,
-                substrate,
+                &substrate,
             );
-
-            let _ = persisted;
         }
     }
 }
-
-use std::path::PathBuf;
-
-use qp_hd::commands::{
-    load_event_at_activation,
-    qtm_open_manifold_until,
-    PersistedEvent,
-};
 
 #[inline(always)]
 fn refresh(
