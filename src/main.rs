@@ -1,7 +1,7 @@
 use std::env;
 use std::path::PathBuf;
 
-use bit_minner::{
+use bit_miner::{
     BitcoinObservationPipeline,
     RenderState,
 };
