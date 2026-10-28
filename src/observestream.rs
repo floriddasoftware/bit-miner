@@ -379,3 +379,58 @@ fn block_hash(value: &Value) -> Option<&str> {
                 .and_then(Value::as_str)
         })
 }
+
+use std::{
+    collections::{HashSet, VecDeque},
+    error::Error,
+    path::PathBuf,
+    str::FromStr,
+};
+
+use qp_hd::{
+    commands::{
+        load_event_at_activation,
+        qtm_open_manifold_until,
+        PersistedEvent,
+    },
+    pathsregistry::CoinType,
+};
+
+
+#[inline(always)]
+pub fn refresh(
+    pipeline: &mut BitcoinObservationPipeline,
+    substrate: &str,
+) -> PersistedEvent {
+    let activation = pipeline
+        .miner()
+        .clip(substrate)
+        .map(|clip| clip.activation)
+        .expect("no active miner clip for substrate");
+
+    let current = qtm_open_manifold_until(
+        substrate,
+        activation,
+    );
+
+    let realized = current.state.retained_mass();
+
+    let event_path: PathBuf = pipeline
+        .miner_mut()
+        .submit(substrate, realized)
+        .expect("miner submission failed");
+
+    let event_activation = event_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| name.strip_prefix("event_"))
+        .and_then(|name| name.split('_').next())
+        .and_then(|value| value.parse::<u64>().ok())
+        .expect("invalid event path");
+
+    load_event_at_activation(
+        substrate,
+        event_activation,
+    )
+}
+
