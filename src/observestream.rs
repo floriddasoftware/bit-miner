@@ -38,7 +38,7 @@ pub type ObservationResult<T> =
     Result<T, Box<dyn Error + Send + Sync>>;
 
 pub type PipelineOutcome =
-    Result<Option<(FinalizedSettlement, Vec<PersistedEvent>)>, SettlementError>;
+   Result<Option<(FinalizedSettlement, Vec<Retain>)>, SettlementError>;
 
 const MEMPOOL_SPACE_WS: &str = "wss://mempool.space/api/v1/ws";
 const MEMPOOL_SPACE_API: &str = "https://mempool.space/api";
