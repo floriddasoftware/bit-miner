@@ -1,3 +1,4 @@
+use std::env;
 use bit_miner::{
     observestream::refresh,
     BitcoinObservationPipeline,
