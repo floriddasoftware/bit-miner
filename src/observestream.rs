@@ -3,6 +3,7 @@ use std::{
     collections::{HashSet, VecDeque},
     error::Error,
     str::FromStr,
+    path::PathbBuf,
 };
 
 use bitcoin::{consensus::Decodable, Txid};
@@ -380,12 +381,7 @@ fn block_hash(value: &Value) -> Option<&str> {
         })
 }
 
-use std::{
-    collections::{HashSet, VecDeque},
-    error::Error,
-    path::PathBuf,
-    str::FromStr,
-};
+
 
 use qp_hd::{
     commands::{
