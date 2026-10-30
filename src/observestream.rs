@@ -188,7 +188,7 @@ pub async fn stream<F>(
     mut sink: F,
 ) -> ObservationResult<usize>
 where
-    F: FnMut(Txid, PipelineOutcome),
+    F: FnMut(Txid, PipelineOutcome, usize),
 {
     self.track_blocks = false;
     let source = self.source;
@@ -222,19 +222,18 @@ where
 
     while let Some(observed) = receiver.recv().await {
         let txid = observed.txid;
-
         let outcome = pipeline.process(substrate, observed);
 
-        sink(txid, outcome);
+        // Read the actual pipeline counter after processing this transaction.
+        let submissions = pipeline.miner.submissions;
+
+        sink(txid, outcome, submissions);
     }
 
-    // Propagate reader errors before reporting telemetry.
     reader.join().await?;
 
-    // Return the actual caller-owned miner submission counter.
     Ok(pipeline.miner.submissions)
 }
-
 
     async fn fill(&mut self) -> ObservationResult<()> {
         let message = self
@@ -416,14 +415,14 @@ impl ObservationStreamManager {
 
     /// Starts a stream if one is not already running for this substrate and
     /// activation. The callback receives each processed transaction outcome.
-    pub async fn start<F>(
-        &self,
-        substrate: &str,
-        activation: u64,
-        sink: F,
-    ) -> ObservationResult<()>
-    where
-        F: FnMut(Txid, PipelineOutcome) + Send + 'static,
+pub async fn start<F>(
+    &self,
+    substrate: &str,
+    activation: u64,
+    sink: F,
+) -> ObservationResult<()>
+where
+    F: FnMut(Txid, PipelineOutcome, usize) + Send + 'static,
     {
         let key = (substrate.to_owned(), activation);
         let mut tasks = self.tasks.lock().await;
