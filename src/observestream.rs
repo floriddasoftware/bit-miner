@@ -561,22 +561,17 @@ pub fn refresh(
         .clip(substrate)
         .map(|clip| clip.activation)
         .expect("no active miner clip for substrate");
-
     let current = qtm_open_manifold_until(substrate, activation);
-    let realized = current.state.retained_mass();
-
     let event_path: PathBuf = pipeline
         .miner_mut()
-        .submit(substrate, realized)
+        .submit(substrate, activation)
         .expect("miner submission failed");
-
     let event_activation = event_path
         .file_name()
         .and_then(|name| name.to_str())
         .and_then(|name| name.strip_prefix("event_"))
-        .and_then(|name| name.split('_').next())
         .and_then(|value| value.parse::<u64>().ok())
         .expect("invalid event path");
-
+    let _ = current;
     load_event_at_activation(substrate, event_activation)
 }
