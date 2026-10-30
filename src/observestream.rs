@@ -175,57 +175,66 @@ impl MempoolSpaceStream {
         }
     }
 
-    /// Process observations sequentially through the caller-owned pipeline.
-    ///
-    /// The reader task is guarded so that aborting this stream future also
-    /// aborts the reader instead of leaving a detached WebSocket task behind.
-    pub async fn stream<F>(
-        mut self,
-        substrate: &str,
-        pipeline: &mut BitcoinObservationPipeline,
-        mut sink: F,
-    ) -> ObservationResult<()>
-    where
-        F: FnMut(Txid, PipelineOutcome),
-    {
-        self.track_blocks = false;
-        let source = self.source;
+       
+/// Process observations sequentially through the caller-owned pipeline.
+///
+/// Returns the live miner submission count after the reader completes.
+/// The reader task is guarded so aborting this stream also aborts the
+/// WebSocket reader instead of leaving a detached task behind.
+pub async fn stream<F>(
+    mut self,
+    substrate: &str,
+    pipeline: &mut BitcoinObservationPipeline,
+    mut sink: F,
+) -> ObservationResult<usize>
+where
+    F: FnMut(Txid, PipelineOutcome),
+{
+    self.track_blocks = false;
+    let source = self.source;
 
-        let (sender, mut receiver) =
-            tokio::sync::mpsc::channel::<ObservedBitcoinTransaction>(
-                CHANNEL_CAPACITY,
-            );
+    let (sender, mut receiver) =
+        tokio::sync::mpsc::channel::<ObservedBitcoinTransaction>(
+            CHANNEL_CAPACITY,
+        );
 
-        let reader = ReaderTask::new(tokio::spawn(async move {
-            loop {
-                match self.next_observation().await? {
-                    BitcoinObservation::Transaction(transaction) => {
-                        let observed =
-                            ObservedBitcoinTransaction::from_transaction(
-                                transaction,
-                                source,
-                            );
+    let reader = ReaderTask::new(tokio::spawn(async move {
+        loop {
+            match self.next_observation().await? {
+                BitcoinObservation::Transaction(transaction) => {
+                    let observed =
+                        ObservedBitcoinTransaction::from_transaction(
+                            transaction,
+                            source,
+                        );
 
-                        if sender.send(observed).await.is_err() {
-                            return Ok(());
-                        }
+                    if sender.send(observed).await.is_err() {
+                        return Ok(());
                     }
-                    BitcoinObservation::Block(_) => {}
                 }
+                BitcoinObservation::Block(_) => {}
             }
-
-            #[allow(unreachable_code)]
-            Ok::<(), Box<dyn Error + Send + Sync>>(())
-        }));
-
-        while let Some(observed) = receiver.recv().await {
-            let txid = observed.txid;
-            let outcome = pipeline.process(substrate, observed);
-            sink(txid, outcome);
         }
 
-        reader.join().await
+        #[allow(unreachable_code)]
+        Ok::<(), Box<dyn Error + Send + Sync>>(())
+    }));
+
+    while let Some(observed) = receiver.recv().await {
+        let txid = observed.txid;
+
+        let outcome = pipeline.process(substrate, observed);
+
+        sink(txid, outcome);
     }
+
+    // Propagate reader errors before reporting telemetry.
+    reader.join().await?;
+
+    // Return the actual caller-owned miner submission counter.
+    Ok(pipeline.miner.submissions)
+}
+
 
     async fn fill(&mut self) -> ObservationResult<()> {
         let message = self
