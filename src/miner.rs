@@ -73,11 +73,11 @@ impl Miner {
             .find(|clip| clip.substrate == substrate)
     }
 
-    #[inline(always)]
+  #[inline(always)]
 pub fn submit(
     &mut self,
     substrate: &str,
-    realized: u128,
+    activation: u64,
 ) -> Result<PathBuf, std::io::Error> {
     let clip = self.clip(substrate).ok_or_else(|| {
         std::io::Error::new(
@@ -85,38 +85,42 @@ pub fn submit(
             format!("active clip not found: {substrate}"),
         )
     })?;
-
-    let budget = qp_hd::commands::load_budget(&clip.substrate)?;
-
+    if clip.activation != activation {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!(
+                "activation mismatch: substrate={} requested={} active={}",
+                substrate,
+                activation,
+                clip.activation,
+            ),
+        ));
+    }
+    let clip_substrate = clip.substrate.clone();
+    let budget = qp_hd::commands::load_budget(&clip_substrate)?;
     if self.submissions as u64 >= budget.max_events {
         return Err(std::io::Error::new(
             std::io::ErrorKind::PermissionDenied,
             format!(
-                "submission budget exhausted: substrate={} submissions={} max_events={}",
-                clip.substrate,
+                "submission budget exhausted: substrate={} activation={} submissions={} max_events={}",
+                clip_substrate,
+                activation,
                 self.submissions,
                 budget.max_events,
             ),
         ));
     }
-
-    let root = substrate_root().join(&clip.substrate);
-    let events = root.join("events");
-
+    let events = substrate_root()
+        .join(&clip_substrate)
+        .join("events");
     if !events.is_dir() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::NotFound,
             format!("event store not found: {}", events.display()),
         ));
     }
-
-    let event_path = events.join(format!(
-        "event_{}_{}",
-        clip.activation,
-        realized,
-    ));
-
-    if !event_path.exists() {
+    let event_path = events.join(format!("event_{activation}"));
+    if !event_path.is_file() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::NotFound,
             format!(
@@ -125,9 +129,6 @@ pub fn submit(
             ),
         ));
     }
-
     self.submissions = self.submissions.saturating_add(1);
-
     Ok(event_path)
-    }
 }
