@@ -1,5 +1,13 @@
-use std::path::PathBuf;
-use qp_hd::commands::substrate_root;
+use std::{
+    collections::HashMap,
+    io,
+    path::PathBuf,
+};
+use qp_hd::commands::{
+    event_path_at_activation,
+    load_budget,
+    substrate_root,
+};
 use crate::broadcast::Broadcaster;
 pub struct ActiveClip {
     pub substrate: String,
@@ -8,44 +16,50 @@ pub struct ActiveClip {
 pub struct Miner {
     pub clips: Vec<ActiveClip>,
     pub broadcaster: Broadcaster,
-    pub submissions: usize,
+    pub submissions: HashMap<String, u64>,
+}
+fn not_found(message: String) -> io::Error {
+    io::Error::new(io::ErrorKind::NotFound, message)
 }
 impl Miner {
     #[inline(always)]
     pub fn new(activation: u64) -> Self {
-        let broadcaster = Broadcaster::init();
-        let substrate = substrate_root()
+        let root = substrate_root();
+        let mut clips = root
             .read_dir()
             .expect("Failed to read substrate root")
             .filter_map(Result::ok)
-            .filter(|entry| entry.path().is_dir())
-            .find_map(|entry| {
+            .filter_map(|entry| {
                 let path = entry.path();
-                let activation_path = path.join("activation");
-                let active_activation = std::fs::read_to_string(activation_path)
-                    .ok()?
-                    .trim()
-                    .parse::<u64>()
-                    .ok()?;
-                if active_activation == activation {
-                    Some(ActiveClip {
-                        substrate: entry.file_name().to_string_lossy().into_owned(),
-                        activation: active_activation,
-                    })
-                } else {
-                    None
+                if !path.is_dir() {
+                    return None;
                 }
-            });
-        let clips = substrate.into_iter().collect::<Vec<_>>();
+                let active = std::fs::read_to_string(
+                    path.join("activation"),
+                )
+                .ok()?
+                .trim()
+                .parse::<u64>()
+                .ok()?;
+                (active == activation).then(|| ActiveClip {
+                    substrate: entry.file_name().to_string_lossy().into_owned(),
+                    activation: active,
+                })
+            })
+            .collect::<Vec<_>>();
+        clips.sort_by(|a, b| a.substrate.cmp(&b.substrate));
         assert!(
             !clips.is_empty(),
             "No active clip found for activation {activation}."
         );
-        println!("⚡ Miner online active_clips={}", clips.len());
+        println!(
+            "⚡ Miner online active_clips={}",
+            clips.len()
+        );
         Self {
             clips,
-            broadcaster,
-            submissions: 0,
+            broadcaster: Broadcaster::init(),
+            submissions: HashMap::new(),
         }
     }
     #[inline(always)]
@@ -63,58 +77,64 @@ impl Miner {
         &mut self,
         substrate: &str,
         activation: u64,
-    ) -> Result<PathBuf, std::io::Error> {
-        let clip = self.clip(substrate).ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                format!("active clip not found: {substrate}"),
-            )
-        })?;
+    ) -> Result<PathBuf, io::Error> {
+        let clip = self
+            .clip(substrate)
+            .ok_or_else(|| {
+                not_found(format!(
+                    "active clip not found: {substrate}"
+                ))
+            })?;
         if clip.activation != activation {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                format!(
-                    "activation mismatch: substrate={} requested={} active={}",
-                    substrate,
-                    activation,
-                    clip.activation,
-                ),
-            ));
+            return Err(not_found(format!(
+                "activation mismatch: substrate={} requested={} active={}",
+                substrate,
+                activation,
+                clip.activation,
+            )));
         }
         let clip_substrate = clip.substrate.clone();
-        let budget = qp_hd::commands::load_budget(&clip_substrate)?;
-        if self.submissions as u64 >= budget.max_events {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::PermissionDenied,
+        let budget = load_budget(&clip_substrate)?;
+        let submissions = self
+            .submissions
+            .get(&clip_substrate)
+            .copied()
+            .unwrap_or(0);
+        if submissions >= budget.max_events {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
                 format!(
                     "submission budget exhausted: substrate={} activation={} submissions={} max_events={}",
                     clip_substrate,
                     activation,
-                    self.submissions,
+                    submissions,
                     budget.max_events,
                 ),
             ));
         }
-        let events = substrate_root()
-            .join(&clip_substrate)
-            .join("events");
-        if !events.is_dir() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                format!("event store not found: {}", events.display()),
-            ));
+        let stored = event_path_at_activation(
+            &clip_substrate,
+            activation,
+        )
+        .ok_or_else(|| {
+            not_found(format!(
+                "stored event not found: {}/events/event_{activation}*",
+                substrate_root()
+                    .join(&clip_substrate)
+                    .display()
+            ))
+        })?;
+        if !stored.is_dir() {
+            return Err(not_found(format!(
+                "stored event directory not found: {}",
+                stored.display()
+            )));
         }
-        let event_path = events.join(format!("event_{activation}"));
-        if !event_path.is_file() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                format!(
-                    "stored event not found: {}",
-                    event_path.display()
-                ),
-            ));
-        }
-        self.submissions = self.submissions.saturating_add(1);
-        Ok(event_path)
+        self.submissions.insert(
+            clip_substrate,
+            submissions.saturating_add(1),
+        );
+        // Return the canonical activation key expected by observestream.
+        Ok(stored.with_file_name(format!("event_{activation}")))
     }
 }
