@@ -10,6 +10,7 @@ use qp_hd::commands::{
     event_path_at_activation,
     load_budget,
     load_depth,
+    substrate_root,
 };
 
 use crate::broadcast::Broadcaster;
