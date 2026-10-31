@@ -8,32 +8,49 @@ use qp_hd::commands::{
     load_budget,
     substrate_root,
 };
+use std::{
+    collections::HashMap,
+    io,
+};
+
 use crate::broadcast::Broadcaster;
+use qp_hd::commands::substrate_root;
+
 pub struct ActiveClip {
     pub substrate: String,
     pub activation: u64,
 }
+
+pub struct ActiveScript {
+    pub activation: u64,
+}
+
 pub struct Miner {
     pub clips: Vec<ActiveClip>,
     pub broadcaster: Broadcaster,
     pub submissions: HashMap<String, u64>,
 }
+
 fn not_found(message: String) -> io::Error {
     io::Error::new(io::ErrorKind::NotFound, message)
 }
+
 impl Miner {
     #[inline(always)]
-    pub fn new(activation: u64) -> Self {
+    pub fn new(script: ActiveScript) -> Self {
         let root = substrate_root();
+
         let mut clips = root
             .read_dir()
             .expect("Failed to read substrate root")
             .filter_map(Result::ok)
             .filter_map(|entry| {
                 let path = entry.path();
+
                 if !path.is_dir() {
                     return None;
                 }
+
                 let active = std::fs::read_to_string(
                     path.join("activation"),
                 )
@@ -41,27 +58,35 @@ impl Miner {
                 .trim()
                 .parse::<u64>()
                 .ok()?;
-                (active == activation).then(|| ActiveClip {
+
+                (active == script.activation).then(|| ActiveClip {
                     substrate: entry.file_name().to_string_lossy().into_owned(),
                     activation: active,
                 })
             })
             .collect::<Vec<_>>();
+
         clips.sort_by(|a, b| a.substrate.cmp(&b.substrate));
+
         assert!(
             !clips.is_empty(),
-            "No active clip found for activation {activation}."
+            "No active clips found for activation {}.",
+            script.activation
         );
+
         println!(
-            "⚡ Miner online active_clips={}",
-            clips.len()
+            "⚡ Miner online active_clips={} activation={}",
+            clips.len(),
+            script.activation
         );
+
         Self {
             clips,
             broadcaster: Broadcaster::init(),
             submissions: HashMap::new(),
         }
     }
+}
     #[inline(always)]
     pub fn clips(&self) -> &[ActiveClip] {
         &self.clips
