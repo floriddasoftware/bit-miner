@@ -10,7 +10,6 @@ use qp_hd::commands::{
     event_path_at_activation,
     load_budget,
     load_depth,
-    substrate_root,
 };
 
 use crate::broadcast::Broadcaster;
@@ -31,49 +30,20 @@ fn not_found(message: String) -> io::Error {
 }
 
 impl Miner {
-    #[inline(always)]
-    pub fn new(clip: ActiveClip) -> Self {
-        let substrate = clip.substrate.clone();
+   #[inline(always)]
+pub fn new(clip: ActiveClip) -> Self {
+    println!(
+        "⚡ Miner online substrate={} activation={}",
+        clip.substrate,
+        clip.activation
+    );
 
-        let active_path = substrate_root()
-            .join(&substrate)
-            .join("activation");
-
-        let active = std::fs::read_to_string(&active_path)
-            .map_err(|error| {
-                format!(
-                    "unable to read activation for {substrate}: {error}"
-                )
-            })
-            .and_then(|value| {
-                value.trim().parse::<u64>().map_err(|error| {
-                    format!(
-                        "invalid activation for {substrate}: {error}"
-                    )
-                })
-            })
-            .expect("Failed to resolve active substrate activation");
-
-        assert_eq!(
-            active,
-            clip.activation,
-            "Activation mismatch for substrate {substrate}: requested={}, active={active}",
-            clip.activation
-        );
-
-        println!(
-            "⚡ Miner online substrate={} activation={}",
-            substrate,
-            clip.activation
-        );
-
-        Self {
-            clips: vec![clip],
-            broadcaster: Broadcaster::init(),
-            submissions: HashMap::new(),
-        }
+    Self {
+        clips: vec![clip],
+        broadcaster: Broadcaster::init(),
+        submissions: HashMap::new(),
     }
-
+}
     #[inline(always)]
     pub fn clips(&self) -> &[ActiveClip] {
         &self.clips
