@@ -10,7 +10,7 @@ use crate::{
     bitcoinpayload::BitcoinPayload,
     bitcoinutxocollector::BitcoinUTXOCollector,
     broadcast::FinalizedSettlement,
-    miner::{ActiveScript, Miner},
+    miner::{ActiveClip, Miner},
     observebitcointransaction::ObservedBitcoinTransaction,
     qpeventreceipt::EventReceipt,
     render::RenderState,
@@ -30,11 +30,14 @@ impl BitcoinObservationPipeline {
         activation: u64,
         substrate: &str,
     ) -> Result<Self, SettlementError> {
+        let clip = ActiveClip {
+            substrate: substrate.to_owned(),
+            activation,
+        };
+
         Ok(Self {
             utxo: BitcoinUTXOCollector::new(),
-            miner: Miner::new(ActiveScript {
-                activation,
-            }),
+            miner: Miner::new(clip),
             chain: RenderState::window(substrate.to_owned()),
         })
     }
@@ -69,7 +72,6 @@ impl BitcoinObservationPipeline {
             return Ok(None);
         }
 
-        // Resolve the active substrate clip.
         let activation = self
             .miner
             .clip(substrate)
@@ -80,19 +82,16 @@ impl BitcoinObservationPipeline {
                 ))
             })?;
 
-        // Recover the current manifold.
         let current = qtm_open_manifold_until(
             substrate,
             activation,
         );
 
-        // Materialize the Bitcoin payload first.
         let (bitcoin, retained) = self.bitcoin_payload(
             &observed,
             &current.state,
         )?;
 
-        // Submit and recover the persisted payload depth.
         let depth = self
             .miner
             .submit(substrate, activation)
@@ -102,7 +101,6 @@ impl BitcoinObservationPipeline {
                 ))
             })?;
 
-        // Recover the persisted event.
         let persisted = load_event_at_activation(
             substrate,
             activation,
@@ -110,7 +108,6 @@ impl BitcoinObservationPipeline {
 
         let mut event = match persisted {
             PersistedEvent::Transit(event) => event,
-
             PersistedEvent::Exile(_) => {
                 return Err(SettlementError::Backend(
                     "expected a transit event, found an exile event".into(),
@@ -118,16 +115,13 @@ impl BitcoinObservationPipeline {
             }
         };
 
-        // Use the depth recovered by the miner submission.
         event.depth = depth;
 
-        // Derive the canonical locked structure.
         let locked = qp_hd::protocol_id::LockedStructure {
             dimension: event.heritage.state.dimension(),
             structural_value: event.heritage.state.structural_value(),
         };
 
-        // Construct the settlement receipt.
         let event_receipt = EventReceipt::new(
             event,
             SettlementState::Pending,
@@ -137,7 +131,6 @@ impl BitcoinObservationPipeline {
             SettlementError::Backend(error.to_string())
         })?;
 
-        // Advance the materialized payload into settlement.
         self.advance_materialized(
             substrate,
             bitcoin,
