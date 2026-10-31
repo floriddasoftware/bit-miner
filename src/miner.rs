@@ -20,10 +20,6 @@ pub struct ActiveClip {
     pub activation: u64,
 }
 
-pub struct ActiveScript {
-    pub activation: u64,
-}
-
 pub struct Miner {
     pub clips: Vec<ActiveClip>,
     pub broadcaster: Broadcaster,
@@ -36,51 +32,43 @@ fn not_found(message: String) -> io::Error {
 
 impl Miner {
     #[inline(always)]
-    pub fn new(script: ActiveScript) -> Self {
-        let root = substrate_root();
+    pub fn new(clip: ActiveClip) -> Self {
+        let substrate = clip.substrate.clone();
 
-        let mut clips = root
-            .read_dir()
-            .expect("Failed to read substrate root")
-            .filter_map(Result::ok)
-            .filter_map(|entry| {
-                let path = entry.path();
+        let active_path = substrate_root()
+            .join(&substrate)
+            .join("activation");
 
-                if !path.is_dir() {
-                    return None;
-                }
-
-                let active = std::fs::read_to_string(
-                    path.join("activation"),
+        let active = std::fs::read_to_string(&active_path)
+            .map_err(|error| {
+                format!(
+                    "unable to read activation for {substrate}: {error}"
                 )
-                .ok()?
-                .trim()
-                .parse::<u64>()
-                .ok()?;
-
-                (active == script.activation).then(|| ActiveClip {
-                    substrate: entry.file_name().to_string_lossy().into_owned(),
-                    activation: active,
+            })
+            .and_then(|value| {
+                value.trim().parse::<u64>().map_err(|error| {
+                    format!(
+                        "invalid activation for {substrate}: {error}"
+                    )
                 })
             })
-            .collect::<Vec<_>>();
+            .expect("Failed to resolve active substrate activation");
 
-        clips.sort_by(|a, b| a.substrate.cmp(&b.substrate));
-
-        assert!(
-            !clips.is_empty(),
-            "No active clips found for activation {}.",
-            script.activation
+        assert_eq!(
+            active,
+            clip.activation,
+            "Activation mismatch for substrate {substrate}: requested={}, active={active}",
+            clip.activation
         );
 
         println!(
-            "⚡ Miner online active_clips={} activation={}",
-            clips.len(),
-            script.activation
+            "⚡ Miner online substrate={} activation={}",
+            substrate,
+            clip.activation
         );
 
         Self {
-            clips,
+            clips: vec![clip],
             broadcaster: Broadcaster::init(),
             submissions: HashMap::new(),
         }
@@ -122,7 +110,6 @@ impl Miner {
         }
 
         let clip_substrate = clip.substrate.clone();
-
         let budget = load_budget(&clip_substrate)?;
 
         let submissions = self
