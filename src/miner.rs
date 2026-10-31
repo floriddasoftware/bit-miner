@@ -164,7 +164,7 @@ impl Miner {
             )));
         }
 
-        let depth = load_depth(&stored);
+        let depth = load_depth(&stored)?;
 
         self.submissions.insert(
             clip_substrate,
