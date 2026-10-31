@@ -7,25 +7,47 @@ use crate::broadcast::FinalizedSettlement;
 use crate::sharedtypes::SettlementState;
 use qp_hd::qp44::{PQ44Event, QP44Event};
 
+
+use std::{
+    error::Error,
+    fmt,
+    io,
+};
+
 #[derive(Debug)]
 pub enum SettlementError {
     Backend(String),
     Unsupported(&'static str),
+    Io(io::Error),
 }
 
-impl std::fmt::Display for SettlementError {
+impl fmt::Display for SettlementError {
     fn fmt(
         &self,
-        f: &mut std::fmt::Formatter<'_>,
-    ) -> std::fmt::Result {
+        f: &mut fmt::Formatter<'_>,
+    ) -> fmt::Result {
         match self {
             Self::Backend(msg) => write!(f, "{msg}"),
             Self::Unsupported(msg) => write!(f, "{msg}"),
+            Self::Io(error) => write!(f, "{error}"),
         }
     }
 }
 
-impl std::error::Error for SettlementError {}
+impl Error for SettlementError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Io(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
+impl From<io::Error> for SettlementError {
+    fn from(error: io::Error) -> Self {
+        Self::Io(error)
+    }
+}
 
 pub struct SettlementEngine;
 
