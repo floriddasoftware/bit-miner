@@ -146,24 +146,24 @@ impl MempoolSpaceStream {
         }
     }
 
-    /// Passes the next transaction directly to the caller-owned pipeline.
-    pub async fn stream(
-        &mut self,
-        substrate: &str,
-        pipeline: &mut BitcoinObservationPipeline,
-    ) -> ObservationResult<PipelineOutcome> {
-        let observation = self.next_observation().await?;
+/// Passes the next transaction through finalization and broadcasting.
+pub async fn stream(
+    &mut self,
+    substrate: &str,
+    pipeline: &mut BitcoinObservationPipeline,
+) -> ObservationResult<PipelineOutcome> {
+    let observation = self.next_observation().await?;
 
-        let BitcoinObservation::Transaction(transaction) = observation;
+    let BitcoinObservation::Transaction(transaction) = observation;
 
-        let observed =
-            ObservedBitcoinTransaction::from_transaction(
-                transaction,
-                self.source,
-            );
+    let observed =
+        ObservedBitcoinTransaction::from_transaction(
+            transaction,
+            self.source,
+        );
 
-        Ok(pipeline.process(substrate, observed))
-    }
+    Ok(refresh(pipeline, substrate, observed))
+}
 
     async fn fill(&mut self) -> ObservationResult<()> {
         let message = self
