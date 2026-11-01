@@ -8,7 +8,6 @@ use qtm_graph::graph::frame::Depth;
 
 use qp_hd::commands::{
     event_path_at_activation,
-    load_budget,
     load_depth,
     substrate_root,
 };
@@ -31,20 +30,21 @@ fn not_found(message: String) -> io::Error {
 }
 
 impl Miner {
-   #[inline(always)]
-pub fn new(clip: ActiveClip) -> Self {
-    println!(
-        "⚡ Miner online substrate={} activation={}",
-        clip.substrate,
-        clip.activation
-    );
+    #[inline(always)]
+    pub fn new(clip: ActiveClip) -> Self {
+        println!(
+            "⚡ Miner online substrate={} activation={}",
+            clip.substrate,
+            clip.activation
+        );
 
-    Self {
-        clips: vec![clip],
-        broadcaster: Broadcaster::init(),
-        submissions: HashMap::new(),
+        Self {
+            clips: vec![clip],
+            broadcaster: Broadcaster::init(),
+            submissions: HashMap::new(),
+        }
     }
-}
+
     #[inline(always)]
     pub fn clips(&self) -> &[ActiveClip] {
         &self.clips
@@ -81,26 +81,6 @@ pub fn new(clip: ActiveClip) -> Self {
         }
 
         let clip_substrate = clip.substrate.clone();
-        let budget = load_budget(&clip_substrate)?;
-
-        let submissions = self
-            .submissions
-            .get(&clip_substrate)
-            .copied()
-            .unwrap_or(0);
-
-        if submissions >= budget.max_events {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                format!(
-                    "submission budget exhausted: substrate={} activation={} submissions={} max_events={}",
-                    clip_substrate,
-                    activation,
-                    submissions,
-                    budget.max_events,
-                ),
-            ));
-        }
 
         let stored = event_path_at_activation(
             &clip_substrate,
@@ -123,6 +103,12 @@ pub fn new(clip: ActiveClip) -> Self {
         }
 
         let depth = load_depth(&stored)?;
+
+        let submissions = self
+            .submissions
+            .get(&clip_substrate)
+            .copied()
+            .unwrap_or(0);
 
         self.submissions.insert(
             clip_substrate,
