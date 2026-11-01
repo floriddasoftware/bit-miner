@@ -316,24 +316,58 @@ async fn fetch_decode<T: Decodable>(
     Ok(bitcoin::consensus::deserialize::<T>(&raw)?)
 }
 
-/// Submits through the active Miner and loads the persisted event.
+/// Finalizes the observation and publishes its settlement wire packets.
 #[inline(always)]
 pub fn refresh(
     pipeline: &mut BitcoinObservationPipeline,
     substrate: &str,
-) -> PersistedEvent {
-    let activation = pipeline
-        .miner()
-        .clip(substrate)
-        .map(|clip| clip.activation)
-        .expect("no active miner clip for substrate");
+    observed: ObservedBitcoinTransaction,
+) -> PipelineOutcome {
+    let outcome = pipeline.process(substrate, observed)?;
 
-    // Miner owns the submission budget and returns the loaded Depth.
-    let _depth = pipeline
-        .miner_mut()
-        .submit(substrate, activation)
-        .expect("miner submission failed");
+    let Some((finalized, retained)) = outcome else {
+        return Ok(None);
+    };
 
-    // The activation is already known; no PathBuf conversion is needed.
-    load_event_at_activation(substrate, activation)
+    // Use the substrate's canonical QTM commitment.
+    let commitment_path = substrate_root()
+        .join(substrate)
+        .join("qtm.commitment");
+
+    let commitment_text =
+        std::fs::read_to_string(&commitment_path)
+            .map_err(|error| {
+                SettlementError::Backend(format!(
+                    "failed to read substrate commitment: {error}"
+                ))
+            })?;
+
+    let commitment_bytes =
+        hex::decode(commitment_text.trim())
+            .map_err(|error| {
+                SettlementError::Backend(format!(
+                    "invalid substrate commitment: {error}"
+                ))
+            })?;
+
+    let commitment: [u8; 32] =
+        commitment_bytes.try_into().map_err(|_| {
+            SettlementError::Backend(
+                "substrate commitment must contain exactly 32 bytes"
+                    .into(),
+            )
+        })?;
+
+    // Convert the finalized settlement into QTM wire packets.
+    let wire_packets = finalized.wire_packets(commitment);
+
+    // Publish every packet through the active Miner broadcaster.
+    for wire_packet in wire_packets {
+        pipeline
+            .miner()
+            .broadcaster
+            .publish(wire_packet);
+    }
+
+    Ok(Some((finalized, retained)))
 }
