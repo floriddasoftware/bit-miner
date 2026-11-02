@@ -7,7 +7,7 @@ use std::{
 use bitcoin::{consensus::Decodable, Txid};
 use futures_util::{SinkExt, StreamExt};
 use qp_hd::{
-    commands::{load_event_at_activation, PersistedEvent},
+    commands::{substrate_root,load_event_at_activation, PersistedEvent},
     pathsregistry::CoinType,
 };
 use quantom_value::Retain;
