@@ -1,4 +1,3 @@
-
 use std::{
     collections::HashMap,
     io,
@@ -31,7 +30,9 @@ fn not_found(message: String) -> io::Error {
 
 impl Miner {
     #[inline(always)]
-    pub fn new(clip: ActiveClip) -> Self {
+    pub fn new(mut clip: ActiveClip) -> Self {
+        clip.activation = clip.activation.saturating_sub(1);
+
         println!(
             "⚡ Miner online substrate={} activation={}",
             clip.substrate,
