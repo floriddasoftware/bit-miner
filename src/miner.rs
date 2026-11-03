@@ -31,7 +31,7 @@ fn not_found(message: String) -> io::Error {
 impl Miner {
     #[inline(always)]
     pub fn new(mut clip: ActiveClip) -> Self {
-        clip.activation = clip.activation.saturating_sub(1);
+        clip.activation = clip.activation.saturating_sub(0);
 
         println!(
             "⚡ Miner online substrate={} activation={}",
