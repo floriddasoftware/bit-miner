@@ -1,3 +1,4 @@
+
 use std::{
     collections::{HashSet, VecDeque},
     error::Error,
@@ -6,10 +7,7 @@ use std::{
 
 use bitcoin::{consensus::Decodable, Txid};
 use futures_util::{SinkExt, StreamExt};
-use qp_hd::{
-    commands::{substrate_root,load_event_at_activation, PersistedEvent},
-    pathsregistry::CoinType,
-};
+use qp_hd::pathsregistry::CoinType;
 use quantom_value::Retain;
 use serde_json::Value;
 use tokio::net::TcpStream;
@@ -33,7 +31,10 @@ pub type ObservationResult<T> =
     Result<T, Box<dyn Error + Send + Sync>>;
 
 pub type PipelineOutcome =
-    Result<Option<(FinalizedSettlement, Vec<Retain>)>, SettlementError>;
+    Result<
+        Option<(FinalizedSettlement, Vec<Retain>, [u8; 32])>,
+        SettlementError,
+    >;
 
 const MEMPOOL_SPACE_WS: &str = "wss://mempool.space/api/v1/ws";
 const MEMPOOL_SPACE_API: &str = "https://mempool.space/api";
@@ -146,24 +147,23 @@ impl MempoolSpaceStream {
         }
     }
 
-/// Passes the next transaction through finalization and broadcasting.
-pub async fn stream(
-    &mut self,
-    substrate: &str,
-    pipeline: &mut BitcoinObservationPipeline,
-) -> ObservationResult<PipelineOutcome> {
-    let observation = self.next_observation().await?;
+    /// Passes the next transaction through finalization and broadcasting.
+    pub async fn stream(
+        &mut self,
+        substrate: &str,
+        pipeline: &mut BitcoinObservationPipeline,
+    ) -> ObservationResult<PipelineOutcome> {
+        let observation = self.next_observation().await?;
 
-    let BitcoinObservation::Transaction(transaction) = observation;
+        let BitcoinObservation::Transaction(transaction) = observation;
 
-    let observed =
-        ObservedBitcoinTransaction::from_transaction(
+        let observed = ObservedBitcoinTransaction::from_transaction(
             transaction,
             self.source,
         );
 
-    Ok(refresh(pipeline, substrate, observed))
-}
+        Ok(refresh(pipeline, substrate, observed))
+    }
 
     async fn fill(&mut self) -> ObservationResult<()> {
         let message = self
@@ -316,7 +316,6 @@ async fn fetch_decode<T: Decodable>(
     Ok(bitcoin::consensus::deserialize::<T>(&raw)?)
 }
 
-/// Finalizes the observation and publishes its settlement wire packets.
 /// Finalizes the observation and publishes its settlement.
 #[inline(always)]
 pub fn refresh(
