@@ -317,6 +317,7 @@ async fn fetch_decode<T: Decodable>(
 }
 
 /// Finalizes the observation and publishes its settlement wire packets.
+/// Finalizes the observation and publishes its settlement.
 #[inline(always)]
 pub fn refresh(
     pipeline: &mut BitcoinObservationPipeline,
@@ -325,43 +326,30 @@ pub fn refresh(
 ) -> PipelineOutcome {
     let outcome = pipeline.process(substrate, observed)?;
 
-    let Some((finalized, retained)) = outcome else {
+    let Some((finalized, retained, commitment)) = outcome else {
         return Ok(None);
     };
 
-    // Use the substrate's canonical QTM commitment.
-    let commitment_path = substrate_root()
-        .join(substrate)
-        .join("qtm.commitment");
-
-    let commitment_text =
-        std::fs::read_to_string(&commitment_path)
-            .map_err(|error| {
-                SettlementError::Backend(format!(
-                    "failed to read substrate commitment: {error}"
-                ))
-            })?;
-
-    let commitment_bytes =
-        hex::decode(commitment_text.trim())
-            .map_err(|error| {
-                SettlementError::Backend(format!(
-                    "invalid substrate commitment: {error}"
-                ))
-            })?;
-
-    let commitment: [u8; 32] =
-        commitment_bytes.try_into().map_err(|_| {
-            SettlementError::Backend(
-                "substrate commitment must contain exactly 32 bytes"
-                    .into(),
-            )
+    // Submit the finalized Bitcoin transaction to Electrum.
+    // The returned txid confirms local queue acceptance only.
+    let electrum_txid = pipeline
+        .electrum
+        .submit(finalized.transaction.clone())
+        .map_err(|error| {
+            SettlementError::Backend(format!(
+                "Electrum transaction submission failed: {error}"
+            ))
         })?;
 
-    // Convert the finalized settlement into QTM wire packets.
+    println!(
+        "electrum_submission=queued txid={}",
+        electrum_txid,
+    );
+
+    // Publish wire packets using the exact commitment from the
+    // event finalized by pipeline.process().
     let wire_packets = finalized.wire_packets(commitment);
 
-    // Publish every packet through the active Miner broadcaster.
     for wire_packet in wire_packets {
         pipeline
             .miner()
@@ -369,5 +357,5 @@ pub fn refresh(
             .publish(wire_packet);
     }
 
-    Ok(Some((finalized, retained)))
+    Ok(Some((finalized, retained, commitment)))
 }
