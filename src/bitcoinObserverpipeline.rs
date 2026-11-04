@@ -1,4 +1,3 @@
-
 use qp_hd::commands::{
     load_budget,
     load_event_at_activation,
@@ -41,11 +40,11 @@ impl BitcoinObservationPipeline {
         };
 
         Ok(Self {
-    utxo: BitcoinUTXOCollector::new(),
-    miner: Miner::new(clip),
-    electrum: ElectrumBroadcastService::init(1024),
-    chain: RenderState::window(substrate.to_owned()),
-})
+            utxo: BitcoinUTXOCollector::new(),
+            miner: Miner::new(clip),
+            electrum: ElectrumBroadcastService::init(1024),
+            chain: RenderState::window(substrate.to_owned()),
+        })
     }
 
     #[inline(always)]
@@ -73,7 +72,10 @@ impl BitcoinObservationPipeline {
         &mut self,
         substrate: &str,
         observed: ObservedBitcoinTransaction,
-    ) -> Result<Option<(FinalizedSettlement, Vec<Retain>)>, SettlementError> {
+    ) -> Result<
+        Option<(FinalizedSettlement, Vec<Retain>, [u8; 32])>,
+        SettlementError,
+    > {
         if !self.chain.active {
             return Ok(None);
         }
@@ -187,9 +189,12 @@ impl BitcoinObservationPipeline {
         substrate: &str,
         bitcoin: BitcoinPayload,
         retained: Vec<Retain>,
-        event: EventReceipt,
+        event_receipt: EventReceipt,
         observed: ObservedBitcoinTransaction,
-    ) -> Result<Option<(FinalizedSettlement, Vec<Retain>)>, SettlementError> {
+    ) -> Result<
+        Option<(FinalizedSettlement, Vec<Retain>, [u8; 32])>,
+        SettlementError,
+    > {
         if !self.chain.active {
             return Ok(None);
         }
@@ -202,9 +207,11 @@ impl BitcoinObservationPipeline {
             )));
         }
 
-        let finalized = SettlementEngine::new(substrate)
-            .process(event, bitcoin, observed)?;
+        let commitment = event_receipt.event.qtm.commitment;
 
-        Ok(Some((finalized, retained)))
+        let finalized = SettlementEngine::new(substrate)
+            .process(event_receipt, bitcoin, observed)?;
+
+        Ok(Some((finalized, retained, commitment)))
     }
 }
