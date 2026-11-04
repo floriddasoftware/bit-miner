@@ -1,3 +1,4 @@
+
 use std::error::Error;
 
 use bit_miner::{
@@ -11,6 +12,9 @@ use bit_miner::{
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
+    let _ = rustls::crypto::ring::default_provider()
+        .install_default();
+
     let args = std::env::args().collect::<Vec<_>>();
 
     let activation = args
