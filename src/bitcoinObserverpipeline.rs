@@ -10,7 +10,10 @@ use quantom_value::{QuantPerm, Retain};
 use crate::{
     bitcoinpayload::BitcoinPayload,
     bitcoinutxocollector::BitcoinUTXOCollector,
-    broadcast::FinalizedSettlement,
+    broadcast::{
+        ElectrumBroadcastService,
+        FinalizedSettlement,
+    },
     miner::{ActiveClip, Miner},
     observebitcointransaction::ObservedBitcoinTransaction,
     qpeventreceipt::EventReceipt,
@@ -22,6 +25,7 @@ use crate::{
 pub struct BitcoinObservationPipeline {
     utxo: BitcoinUTXOCollector,
     pub miner: Miner,
+    pub electrum: ElectrumBroadcastService,
     chain: RenderState,
 }
 
@@ -37,10 +41,11 @@ impl BitcoinObservationPipeline {
         };
 
         Ok(Self {
-            utxo: BitcoinUTXOCollector::new(),
-            miner: Miner::new(clip),
-            chain: RenderState::window(substrate.to_owned()),
-        })
+    utxo: BitcoinUTXOCollector::new(),
+    miner: Miner::new(clip),
+    electrum: ElectrumBroadcastService::init(1024),
+    chain: RenderState::window(substrate.to_owned()),
+})
     }
 
     #[inline(always)]
