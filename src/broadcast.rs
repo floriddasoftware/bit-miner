@@ -1,5 +1,6 @@
 use std::{
     env,
+    fmt,
     io::{Error, ErrorKind, Read, Write},
     net::{SocketAddr, TcpStream, UdpSocket},
     sync::{
@@ -259,7 +260,6 @@ impl WirePacket {
 
         let remaining = bytes.len().saturating_sub(offset);
 
-        // The packet must retain 32 bytes for the commitment.
         if remaining < 32 || script_len > remaining - 32 {
             return Err(Error::new(
                 ErrorKind::InvalidData,
@@ -360,8 +360,6 @@ impl TcpReceiver {
                                 continue;
                             }
 
-                            // Convert the deregistered mio stream into a
-                            // standard stream for blocking framed reads.
                             let stream: TcpStream = stream.into();
 
                             thread::spawn(move || {
@@ -631,7 +629,7 @@ impl BroadcastDriver for TcpGossipDriver {
 }
 
 // -----------------------------------------------------------------------------
-// Broadcaster
+// QTM packet broadcaster
 // -----------------------------------------------------------------------------
 
 pub struct Broadcaster {
@@ -674,7 +672,6 @@ impl Broadcaster {
 
             while let Ok(packet) = rx.recv() {
                 for driver in &drivers {
-                    // Keep the legacy trait signature for compatibility.
                     let _ = driver.publish(&packet);
                 }
             }
@@ -685,8 +682,6 @@ impl Broadcaster {
         Self { queue: tx }
     }
 
-    /// Preserves the existing signature and return value.
-    ///
     /// Blocking send applies backpressure instead of silently dropping a
     /// packet when the queue is full.
     #[inline(always)]
@@ -768,4 +763,440 @@ fn parse_peers(key: &str) -> Option<Vec<SocketAddr>> {
         .collect();
 
     (!peers.is_empty()).then_some(peers)
+}
+
+// -----------------------------------------------------------------------------
+// Electrum transaction broadcaster — BlueWallet ElectrumX pool
+//
+// This service is independent of QTM WirePacket gossip. Call it from within
+// BitcoinObservationPipeline after the canonical settlement transaction has
+// been finalized.
+//
+// submit() only queues the transaction and returns its local txid. DNS,
+// connection, TLS and Electrum JSON-RPC work happens on the worker thread.
+// -----------------------------------------------------------------------------
+
+use rustls::{ClientConfig, RootCertStore, pki_types::ServerName};
+use tokio::{
+    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    net::TcpStream as TokioTcpStream,
+    sync::mpsc::{self, error::TrySendError as TokioTrySendError},
+    task::JoinSet,
+    time::timeout,
+};
+use tokio_rustls::TlsConnector;
+
+const ELECTRUM_ENDPOINT_TIMEOUT: Duration = Duration::from_secs(5);
+const MAX_CONCURRENT_TRANSACTIONS: usize = 32;
+
+#[derive(Clone, Copy, Debug)]
+struct ElectrumEndpoint {
+    host: &'static str,
+    port: u16,
+    tls: bool,
+}
+
+const BLUEWALLET_ELECTRUM_ENDPOINTS: [ElectrumEndpoint; 6] = [
+    ElectrumEndpoint {
+        host: "electrum1.bluewallet.io",
+        port: 443,
+        tls: true,
+    },
+    ElectrumEndpoint {
+        host: "electrum2.bluewallet.io",
+        port: 443,
+        tls: true,
+    },
+    ElectrumEndpoint {
+        host: "electrum3.bluewallet.io",
+        port: 443,
+        tls: true,
+    },
+    ElectrumEndpoint {
+        host: "electrum1.bluewallet.io",
+        port: 50001,
+        tls: false,
+    },
+    ElectrumEndpoint {
+        host: "electrum2.bluewallet.io",
+        port: 50001,
+        tls: false,
+    },
+    ElectrumEndpoint {
+        host: "electrum3.bluewallet.io",
+        port: 50001,
+        tls: false,
+    },
+];
+
+#[derive(Debug)]
+pub enum ElectrumQueueError {
+    Full,
+    Disconnected,
+}
+
+impl fmt::Display for ElectrumQueueError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Full => f.write_str("Electrum broadcast queue is full"),
+            Self::Disconnected => {
+                f.write_str("Electrum broadcast worker disconnected")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ElectrumQueueError {}
+
+#[derive(Clone)]
+pub struct ElectrumBroadcastService {
+    queue: mpsc::Sender<bitcoin::Transaction>,
+}
+
+impl ElectrumBroadcastService {
+    /// Starts a bounded, non-blocking transaction submission service.
+    pub fn init(queue_depth: usize) -> Self {
+        let (tx, mut rx) =
+            mpsc::channel::<bitcoin::Transaction>(queue_depth.max(1));
+
+        thread::spawn(move || {
+            let runtime = match tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()
+            {
+                Ok(runtime) => runtime,
+                Err(error) => {
+                    eprintln!(
+                        "electrum_worker=runtime_failed error={}",
+                        error
+                    );
+                    return;
+                }
+            };
+
+            let tls = Arc::new(electrum_tls_config());
+
+            runtime.block_on(async move {
+                let mut tasks = JoinSet::new();
+                let mut channel_closed = false;
+
+                while !channel_closed || !tasks.is_empty() {
+                    tokio::select! {
+                        transaction = rx.recv(),
+                            if !channel_closed
+                                && tasks.len() < MAX_CONCURRENT_TRANSACTIONS =>
+                        {
+                            match transaction {
+                                Some(transaction) => {
+                                    let tls = Arc::clone(&tls);
+                                    tasks.spawn(async move {
+                                        let txid = transaction.compute_txid();
+                                        let result =
+                                            electrum_broadcast_transaction(
+                                                transaction,
+                                                tls,
+                                            ).await;
+                                        (txid, result)
+                                    });
+                                }
+                                None => channel_closed = true,
+                            }
+                        }
+
+                        joined = tasks.join_next(), if !tasks.is_empty() => {
+                            match joined {
+                                Some(Ok((txid, Ok(endpoint)))) => {
+                                    println!(
+                                        "electrum_broadcast=accepted \
+                                         txid={} endpoint={}",
+                                        txid,
+                                        endpoint
+                                    );
+                                }
+                                Some(Ok((txid, Err(error)))) => {
+                                    eprintln!(
+                                        "electrum_broadcast=failed \
+                                         txid={} error={}",
+                                        txid,
+                                        error
+                                    );
+                                }
+                                Some(Err(error)) => {
+                                    eprintln!(
+                                        "electrum_worker=task_failed error={}",
+                                        error
+                                    );
+                                }
+                                None => {}
+                            }
+                        }
+                    }
+                }
+            });
+        });
+
+        Self { queue: tx }
+    }
+
+    /// Returns the locally computed txid once the transaction is enqueued.
+    /// This is not a relay confirmation or an on-chain confirmation.
+    #[inline]
+    pub fn submit(
+        &self,
+        transaction: bitcoin::Transaction,
+    ) -> Result<Txid, ElectrumQueueError> {
+        let txid = transaction.compute_txid();
+
+        self.queue
+            .try_send(transaction)
+            .map_err(|error| match error {
+                TokioTrySendError::Full(_) => ElectrumQueueError::Full,
+                TokioTrySendError::Closed(_) => {
+                    ElectrumQueueError::Disconnected
+                }
+            })?;
+
+        Ok(txid)
+    }
+}
+
+fn electrum_tls_config() -> ClientConfig {
+    let roots = RootCertStore::from_iter(
+        webpki_roots::TLS_SERVER_ROOTS.iter().cloned(),
+    );
+
+    ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth()
+}
+
+async fn electrum_broadcast_transaction(
+    transaction: bitcoin::Transaction,
+    tls: Arc<ClientConfig>,
+) -> Result<String, String> {
+    let expected_txid = transaction.compute_txid();
+    let raw_transaction = Arc::<str>::from(hex::encode(
+        bitcoin::consensus::serialize(&transaction),
+    ));
+
+    let mut endpoints = JoinSet::new();
+
+    for endpoint in BLUEWALLET_ELECTRUM_ENDPOINTS {
+        let raw_transaction = Arc::clone(&raw_transaction);
+        let tls = Arc::clone(&tls);
+
+        endpoints.spawn(async move {
+            let result = timeout(
+                ELECTRUM_ENDPOINT_TIMEOUT,
+                electrum_broadcast_endpoint(
+                    endpoint,
+                    raw_transaction,
+                    tls,
+                ),
+            )
+            .await
+            .map_err(|_| "endpoint timed out".to_owned())??;
+
+            if result != expected_txid.to_string() {
+                return Err(format!(
+                    "server returned txid {}, expected {}",
+                    result,
+                    expected_txid
+                ));
+            }
+
+            Ok::<_, String>((endpoint, result))
+        });
+    }
+
+    let mut failures = Vec::new();
+
+    while let Some(joined) = endpoints.join_next().await {
+        match joined {
+            Ok(Ok((endpoint, txid))) => {
+                endpoints.abort_all();
+
+                return Ok(format!(
+                    "{}:{} txid={}",
+                    endpoint.host,
+                    endpoint.port,
+                    txid
+                ));
+            }
+            Ok(Err(error)) => failures.push(error),
+            Err(error) if error.is_cancelled() => {}
+            Err(error) => failures.push(error.to_string()),
+        }
+    }
+
+    Err(if failures.is_empty() {
+        "all Electrum endpoint attempts were cancelled".to_owned()
+    } else {
+        failures.join("; ")
+    })
+}
+
+async fn electrum_broadcast_endpoint(
+    endpoint: ElectrumEndpoint,
+    raw_transaction: Arc<str>,
+    tls_config: Arc<ClientConfig>,
+) -> Result<String, String> {
+    let stream = TokioTcpStream::connect((endpoint.host, endpoint.port))
+        .await
+        .map_err(|error| {
+            format!(
+                "connect {}:{}: {}",
+                endpoint.host,
+                endpoint.port,
+                error
+            )
+        })?;
+
+    stream
+        .set_nodelay(true)
+        .map_err(|error| error.to_string())?;
+
+    if endpoint.tls {
+        let connector = TlsConnector::from(tls_config);
+        let server_name = ServerName::try_from(endpoint.host.to_owned())
+            .map_err(|error| {
+                format!("invalid TLS server name: {}", error)
+            })?;
+
+        let stream = connector
+            .connect(server_name, stream)
+            .await
+            .map_err(|error| {
+                format!("TLS {}: {}", endpoint.host, error)
+            })?;
+
+        electrum_exchange(stream, raw_transaction).await
+    } else {
+        electrum_exchange(stream, raw_transaction).await
+    }
+}
+
+async fn electrum_exchange<S>(
+    stream: S,
+    raw_transaction: Arc<str>,
+) -> Result<String, String>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    let mut stream = BufReader::new(stream);
+
+    let version_request = serde_json::json!({
+        "id": 0,
+        "method": "server.version",
+        "params": ["bit-miner", "1.4"]
+    });
+
+    let broadcast_request = serde_json::json!({
+        "id": 1,
+        "method": "blockchain.transaction.broadcast",
+        "params": [raw_transaction.as_ref()]
+    });
+
+    let mut requests = serde_json::to_vec(&version_request)
+        .map_err(|error| error.to_string())?;
+    requests.push(b'\n');
+    requests.extend_from_slice(
+        &serde_json::to_vec(&broadcast_request)
+            .map_err(|error| error.to_string())?,
+    );
+    requests.push(b'\n');
+
+    stream
+        .get_mut()
+        .write_all(&requests)
+        .await
+        .map_err(|error| {
+            format!("write Electrum requests: {}", error)
+        })?;
+
+    stream
+        .get_mut()
+        .flush()
+        .await
+        .map_err(|error| {
+            format!("flush Electrum requests: {}", error)
+        })?;
+
+    let mut version_received = false;
+    let mut broadcast_result: Option<String> = None;
+    let mut line = String::new();
+
+    while !version_received || broadcast_result.is_none() {
+        line.clear();
+
+        let count = stream
+            .read_line(&mut line)
+            .await
+            .map_err(|error| {
+                format!("read Electrum response: {}", error)
+            })?;
+
+        if count == 0 {
+            return Err(
+                "Electrum server closed before both responses arrived"
+                    .to_owned(),
+            );
+        }
+
+        let response: serde_json::Value =
+            serde_json::from_str(line.trim()).map_err(|error| {
+                format!("invalid Electrum JSON response: {}", error)
+            })?;
+
+        match response
+            .get("id")
+            .and_then(serde_json::Value::as_u64)
+        {
+            Some(0) => {
+                if let Some(error) = response
+                    .get("error")
+                    .filter(|value| !value.is_null())
+                {
+                    return Err(format!(
+                        "server.version rejected: {}",
+                        error
+                    ));
+                }
+
+                if response.get("result").is_none() {
+                    return Err(
+                        "server.version response has no result".to_owned()
+                    );
+                }
+
+                version_received = true;
+            }
+            Some(1) => {
+                if let Some(error) = response
+                    .get("error")
+                    .filter(|value| !value.is_null())
+                {
+                    return Err(format!(
+                        "transaction rejected: {}",
+                        error
+                    ));
+                }
+
+                let result = response
+                    .get("result")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or_else(|| {
+                        "broadcast response has no txid result".to_owned()
+                    })?;
+
+                broadcast_result = Some(result.to_owned());
+            }
+            _ => {}
+        }
+    }
+
+    broadcast_result.ok_or_else(|| {
+        "Electrum returned no transaction id".to_owned()
+    })
 }
