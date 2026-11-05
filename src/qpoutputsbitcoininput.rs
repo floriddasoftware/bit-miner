@@ -194,9 +194,6 @@ impl BitcoinInput {
         let pubkey_hash =
             bitcoin::WPubkeyHash::hash(&public_key_bytes);
 
-        let script_code =
-            ScriptBuf::new_p2wpkh(&pubkey_hash);
-
         let expected_script =
             ScriptBuf::new_p2wpkh(&pubkey_hash);
 
@@ -207,6 +204,9 @@ impl BitcoinInput {
                 },
             );
         }
+
+        let script_code =
+            ScriptBuf::new_p2pkh(&public_key.pubkey_hash());
 
         let sighash = SighashCache::new(transaction)
             .p2wpkh_signature_hash(
@@ -237,12 +237,10 @@ impl BitcoinInput {
             EcdsaSighashType::All as u8,
         );
 
-        let witness = Witness::from_slice(&[
+        self.witness = Witness::from_slice(&[
             signature_bytes.as_slice(),
             public_key_bytes.as_slice(),
         ]);
-
-        self.witness = witness;
 
         Ok(self.deep(
             manifold,
