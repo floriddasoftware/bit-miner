@@ -138,27 +138,27 @@ impl SettlementEngine {
     }
 
     #[inline(always)]
-    pub fn process(
-        &self,
-        receipt: EventReceipt,
-        bitcoin: BitcoinPayload,
-        observed: ObservedBitcoinTransaction,
-    ) -> Result<FinalizedSettlement, SettlementError> {
-        let receipt = Self::settle(receipt)?;
+pub fn process(
+    &self,
+    receipt: EventReceipt,
+    bitcoin: BitcoinPayload,
+    observed: ObservedBitcoinTransaction,
+) -> Result<FinalizedSettlement, SettlementError> {
+    let manifold = &receipt.event.heritage.state;
 
-        let transaction = Self::materialize(
-            &receipt,
-            bitcoin,
-            observed,
-        )?;
-        
-    
+    let transaction = Self::materialize(
+        manifold,
+        bitcoin,
+        observed,
+    )?;
 
-        Ok(FinalizedSettlement::new(
-            Some(receipt),
-            transaction,
-        ))
-    }
+    let receipt = Self::settle(receipt)?;
+
+    Ok(FinalizedSettlement::new(
+        Some(receipt),
+        transaction,
+    ))
+}
 
     #[inline(always)]
     pub fn proceed(
@@ -168,7 +168,7 @@ impl SettlementEngine {
         observed: ObservedBitcoinTransaction,
     ) -> Result<FinalizedSettlement, SettlementError> {
         let transaction = Self::materialize(
-            &receipt,
+            &receipt.event.heritage.state;
             bitcoin,
             observed,
         )?;
@@ -188,47 +188,32 @@ impl SettlementEngine {
     }
 
     #[inline(always)]
-    fn materialize(
-        receipt: &SettlementReceipt,
-        bitcoin: BitcoinPayload,
-        observed: ObservedBitcoinTransaction,
-    ) -> Result<Transaction, SettlementError> {
-        match receipt.state {
-            SettlementState::Success => {}
-            SettlementState::Pending => {
-                return Err(SettlementError::Unsupported(
-                    "cannot materialize a pending settlement",
-                ));
-            }
-            SettlementState::Failed => {
-                return Err(SettlementError::Unsupported(
-                    "cannot materialize a failed settlement",
-                ));
-            }
-        }
-
-        if bitcoin.outputs.is_empty() {
-            return Err(SettlementError::Unsupported(
-                "cannot materialize a transaction without outputs",
-            ));
-        }
-
-        if bitcoin.inputs.is_empty() {
-            return Err(SettlementError::Unsupported(
-                "cannot materialize a transaction without inputs",
-            ));
-        }
-
-        let observed_transaction =
-            ObservedBitcoinTransaction::new_transact(
-                &receipt.event.heritage.state,
-                bitcoin,
-                observed.source,
-            )
-            .map_err(|error| {
-                SettlementError::Backend(error.to_string())
-            })?;
-
-        Ok(observed_transaction.transaction)
+fn materialize(
+    manifold: &QuantPerm,
+    bitcoin: BitcoinPayload,
+    observed: ObservedBitcoinTransaction,
+) -> Result<Transaction, SettlementError> {
+    if bitcoin.outputs.is_empty() {
+        return Err(SettlementError::Unsupported(
+            "cannot materialize a transaction without outputs",
+        ));
     }
+
+    if bitcoin.inputs.is_empty() {
+        return Err(SettlementError::Unsupported(
+            "cannot materialize a transaction without inputs",
+        ));
+    }
+
+    let observed_transaction =
+        ObservedBitcoinTransaction::new_transact(
+            manifold,
+            bitcoin,
+            observed.source,
+        )
+        .map_err(|error| {
+            SettlementError::Backend(error.to_string())
+        })?;
+
+    Ok(observed_transaction.transaction)
 }
