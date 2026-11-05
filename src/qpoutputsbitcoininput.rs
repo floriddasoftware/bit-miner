@@ -69,36 +69,7 @@ pub fn new(
     let retained = input.deep(manifold, "qp/payload", 0);
     (input, retained)
 }
-#[inline(always)]
-pub fn assign_public_key(
-    &mut self,
-    manifold: &QuantPerm,
-    public_key: PublicKey,
-    position: usize,
-) -> Retain {
-    let public_key_bytes = public_key.to_bytes();
-    self.witness = Witness::from_slice(&[
-        &[],
-        public_key_bytes.as_slice(),
-    ]);
-    self.deep(manifold, "qp/payload", position)
-}
-#[inline(always)]
-pub fn assign_public_key_bytes(
-    &mut self,
-    manifold: &QuantPerm,
-    public_key: &[u8],
-    position: usize,
-) -> Retain {
-    match SecpPublicKey::from_slice(public_key) {
-        Ok(public_key) => self.assign_public_key(
-            manifold,
-            PublicKey::new(public_key),
-            position,
-        ),
-        Err(_) => manifold.retain(0, manifold.dimension()),
-    }
-}
+
 #[inline]
 pub fn sign(
     &mut self,
