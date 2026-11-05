@@ -138,27 +138,71 @@ impl SettlementEngine {
     }
 
     #[inline(always)]
-    pub fn process(
-        &self,
-        receipt: EventReceipt,
-        bitcoin: BitcoinPayload,
-        observed: ObservedBitcoinTransaction,
-    ) -> Result<FinalizedSettlement, SettlementError> {
-        let manifold = &receipt.event.heritage.state;
+pub fn process(
+    &self,
+    receipt: EventReceipt,
+    mut bitcoin: BitcoinPayload,
+    observed: ObservedBitcoinTransaction,
+) -> Result<FinalizedSettlement, SettlementError> {
+    let manifold = &receipt.event.heritage.state;
+    let private_key: [u8; 32] = receipt.event.qtm.coordinate;
 
-        let transaction = Self::materialize(
-            manifold,
-            bitcoin,
-            observed,
-        )?;
+    let mut transaction = Self::materialize(
+        manifold,
+        bitcoin.clone(),
+        observed.clone(),
+    )?;
 
-        let receipt = Self::settle(receipt)?;
-
-        Ok(FinalizedSettlement::new(
-            Some(receipt),
-            transaction,
-        ))
+    if bitcoin.inputs.len() != transaction.input.len() {
+        return Err(SettlementError::Backend(format!(
+            "Bitcoin payload input count does not match materialized transaction: payload={} transaction={}",
+            bitcoin.inputs.len(),
+            transaction.input.len(),
+        )));
     }
+
+    for (index, input) in bitcoin.inputs.iter_mut().enumerate() {
+        if input.previous_output.txid != observed.txid {
+            return Err(SettlementError::Backend(format!(
+                "input {} references unexpected parent transaction",
+                index,
+            )));
+        }
+
+        let previous_output = observed
+            .transaction
+            .output
+            .get(input.previous_output.vout as usize)
+            .ok_or_else(|| {
+                SettlementError::Backend(format!(
+                    "previous output not found for input {}: vout={}",
+                    index,
+                    input.previous_output.vout,
+                ))
+            })?;
+
+        input.sign(
+            manifold,
+            private_key,
+            &transaction,
+            index,
+            previous_output.value.to_sat(),
+            &previous_output.script_pubkey,
+        )
+        .map_err(|error| {
+            SettlementError::Backend(error.to_string())
+        })?;
+
+        transaction.input[index].witness = input.witness.clone();
+    }
+
+    let receipt = Self::settle(receipt)?;
+
+    Ok(FinalizedSettlement::new(
+        Some(receipt),
+        transaction,
+    ))
+}
 
     #[inline(always)]
     pub fn proceed(
