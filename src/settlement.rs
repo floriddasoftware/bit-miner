@@ -144,13 +144,15 @@ impl SettlementEngine {
         bitcoin: BitcoinPayload,
         observed: ObservedBitcoinTransaction,
     ) -> Result<FinalizedSettlement, SettlementError> {
-        let receipt = Self::settle(receipt)?;
+
 
         let transaction = Self::materialize(
             &receipt,
             bitcoin,
             observed,
         )?;
+        
+        let receipt = Self::settle(receipt)?;
 
         Ok(FinalizedSettlement::new(
             Some(receipt),
