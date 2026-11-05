@@ -137,7 +137,7 @@ impl SettlementEngine {
         println!();
     }
 
-    #[inline(always)]
+   #[inline(always)]
 pub fn process(
     &self,
     receipt: EventReceipt,
@@ -147,25 +147,37 @@ pub fn process(
     let manifold = &receipt.event.heritage.state;
     let private_key: [u8; 32] = receipt.event.qtm.coordinate;
 
+    // Every observed parent output must have exactly one child input.
+    if bitcoin.inputs.len() != observed.transaction.output.len() {
+        return Err(SettlementError::Backend(format!(
+            "Bitcoin payload input count does not match observed parent output count: payload={} parent={}",
+            bitcoin.inputs.len(),
+            observed.transaction.output.len(),
+        )));
+    }
+
+    // Construct the child transaction only after topology validation.
     let mut transaction = Self::materialize(
         manifold,
         bitcoin.clone(),
         observed.clone(),
     )?;
 
-    if bitcoin.inputs.len() != transaction.input.len() {
-        return Err(SettlementError::Backend(format!(
-            "Bitcoin payload input count does not match materialized transaction: payload={} transaction={}",
-            bitcoin.inputs.len(),
-            transaction.input.len(),
-        )));
-    }
-
+    // Validate and sign each child input against its corresponding parent output.
     for (index, input) in bitcoin.inputs.iter_mut().enumerate() {
         if input.previous_output.txid != observed.txid {
             return Err(SettlementError::Backend(format!(
                 "input {} references unexpected parent transaction",
                 index,
+            )));
+        }
+
+        if input.previous_output.vout != index as u32 {
+            return Err(SettlementError::Backend(format!(
+                "input ordering mismatch at index {}: expected vout={} actual vout={}",
+                index,
+                index,
+                input.previous_output.vout,
             )));
         }
 
@@ -181,17 +193,18 @@ pub fn process(
                 ))
             })?;
 
-        input.sign(
-            manifold,
-            private_key,
-            &transaction,
-            index,
-            previous_output.value.to_sat(),
-            &previous_output.script_pubkey,
-        )
-        .map_err(|error| {
-            SettlementError::Backend(error.to_string())
-        })?;
+        input
+            .sign(
+                manifold,
+                private_key,
+                &transaction,
+                index,
+                previous_output.value.to_sat(),
+                &previous_output.script_pubkey,
+            )
+            .map_err(|error| {
+                SettlementError::Backend(error.to_string())
+            })?;
 
         transaction.input[index].witness = input.witness.clone();
     }
@@ -203,7 +216,6 @@ pub fn process(
         transaction,
     ))
 }
-
     #[inline(always)]
     pub fn proceed(
         &self,
