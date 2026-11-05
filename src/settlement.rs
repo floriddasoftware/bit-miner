@@ -180,6 +180,12 @@ pub fn process(
                 input.previous_output.vout,
             )));
         }
+        
+        if bitcoin.outputs.is_empty() {
+            return Err(SettlementError::Unsupported(
+                "cannot materialize a transaction without outputs",
+            ));
+        }
 
         let previous_output = observed
             .transaction
@@ -251,11 +257,7 @@ pub fn process(
         bitcoin: BitcoinPayload,
         observed: ObservedBitcoinTransaction,
     ) -> Result<Transaction, SettlementError> {
-        if bitcoin.outputs.is_empty() {
-            return Err(SettlementError::Unsupported(
-                "cannot materialize a transaction without outputs",
-            ));
-        }
+        
 
         if bitcoin.inputs.is_empty() {
             return Err(SettlementError::Unsupported(
