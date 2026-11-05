@@ -73,7 +73,7 @@ impl ObservedBitcoinTransaction {
         }
     }
 
-    #[inline(always)]
+           #[inline(always)]
     pub fn new_transact(
         manifold: &QuantPerm,
         mut payload: BitcoinPayload,
@@ -82,18 +82,32 @@ impl ObservedBitcoinTransaction {
         let coordinate = Qtm::derive_coordinate(manifold);
 
         let fee = u64::try_from(payload.fee_mass(manifold))
-            .unwrap_or(u64::MAX);
+            .map_err(|error| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("Bitcoin fee exceeds supported range: {error}"),
+                )
+            })?;
 
-        if let Some(output) = payload.outputs.last_mut() {
-            output.value = output.value.saturating_sub(fee);
-        }
+        let output = payload.outputs.last_mut()
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "Bitcoin payload has no settlement output",
+                )
+            })?;
 
-        for output in &mut payload.outputs {
-            output.assign(manifold, coordinate)?;
-        }
+        output.value = output.value.checked_sub(fee)
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "Settlement output value is insufficient for fee",
+                )
+            })?;
 
-        let outputs = payload
-            .outputs
+        output.assign(manifold, coordinate)?;
+
+        let outputs = payload.outputs
             .into_iter()
             .map(|output| bitcoin::TxOut {
                 value: bitcoin::Amount::from_sat(output.value),
@@ -101,8 +115,7 @@ impl ObservedBitcoinTransaction {
             })
             .collect();
 
-        let inputs = payload
-            .inputs
+        let inputs = payload.inputs
             .into_iter()
             .map(|input| bitcoin::TxIn {
                 previous_output: input.previous_output,
