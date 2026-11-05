@@ -72,72 +72,83 @@ impl ObservedBitcoinTransaction {
             template_index: None,
         }
     }
+  #[inline(always)]
+      pub fn new_transact(
+    manifold: &QuantPerm,
+    mut payload: BitcoinPayload,
+    source: BitcoinObservationSource,
+) -> ObservationResult<Self> {
+    let coordinate = Qtm::derive_coordinate(manifold);
 
-           #[inline(always)]
-    pub fn new_transact(
-        manifold: &QuantPerm,
-        mut payload: BitcoinPayload,
-        source: BitcoinObservationSource,
-    ) -> ObservationResult<Self> {
-        let coordinate = Qtm::derive_coordinate(manifold);
+    let retained = payload.inputs
+        .iter()
+        .map(|input| input.retained(manifold).mass)
+        .fold(0u128, u128::saturating_add);
 
-        let fee = u64::try_from(payload.fee_mass(manifold))
-            .map_err(|error| {
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    format!("Bitcoin fee exceeds supported range: {error}"),
-                )
-            })?;
+    let fee = u64::try_from(payload.fee_mass(manifold))
+        .map_err(|error| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("Bitcoin fee exceeds supported range: {error}"),
+            )
+        })?;
 
-        let output = payload.outputs.last_mut()
-            .ok_or_else(|| {
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "Bitcoin payload has no settlement output",
-                )
-            })?;
+    let inputs = payload.inputs
+        .into_iter()
+        .map(|input| bitcoin::TxIn {
+            previous_output: input.previous_output,
+            script_sig: input.script_sig,
+            sequence: input.sequence,
+            witness: input.witness,
+        })
+        .collect();
 
-        output.value = output.value.checked_sub(fee)
-            .ok_or_else(|| {
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "Settlement output value is insufficient for fee",
-                )
-            })?;
+    let output = payload.outputs.last_mut()
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Bitcoin payload has no settlement output",
+            )
+        })?;
 
-        output.assign(manifold, coordinate)?;
+    let settlement_value = u64::try_from(retained)
+        .map_err(|error| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("Input retained mass exceeds Bitcoin value range: {error}"),
+            )
+        })?;
 
-        let outputs = payload.outputs
-            .into_iter()
-            .map(|output| bitcoin::TxOut {
-                value: bitcoin::Amount::from_sat(output.value),
-                script_pubkey: output.script_pubkey,
-            })
-            .collect();
+    output.value = settlement_value.checked_sub(fee)
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Settlement value is insufficient for fee",
+            )
+        })?;
 
-        let inputs = payload.inputs
-            .into_iter()
-            .map(|input| bitcoin::TxIn {
-                previous_output: input.previous_output,
-                script_sig: input.script_sig,
-                sequence: input.sequence,
-                witness: input.witness,
-            })
-            .collect();
+    output.assign(manifold, coordinate)?;
 
-        let transaction = bitcoin::Transaction {
-            version: bitcoin::transaction::Version(1),
-            lock_time: bitcoin::absolute::LockTime::ZERO,
-            input: inputs,
-            output: outputs,
-        };
+    let outputs = payload.outputs
+        .into_iter()
+        .map(|output| bitcoin::TxOut {
+            value: bitcoin::Amount::from_sat(output.value),
+            script_pubkey: output.script_pubkey,
+        })
+        .collect();
 
-        let mut observed = Self::from_transaction(transaction, source);
-        observed.fee = Some(fee);
+    let transaction = bitcoin::Transaction {
+        version: bitcoin::transaction::Version(1),
+        lock_time: bitcoin::absolute::LockTime::ZERO,
+        input: inputs,
+        output: outputs,
+    };
 
-        Ok(observed)
-    }
+    let mut observed = Self::from_transaction(transaction, source);
+    observed.fee = Some(fee);
 
+    Ok(observed)
+}
     #[inline(always)]
     pub fn new_transaction(
         manifold: &QuantPerm,
