@@ -25,23 +25,7 @@ impl BitcoinUTXOCollector {
         let transaction = &observed.transaction;
         let mut retained = Vec::new();
 
-        let outputs = transaction
-            .output
-            .iter()
-            .enumerate()
-            .map(|(vout, output)| {
-                let (bitcoin, retain) = BitcoinOutput::new(
-                    manifold,
-                    vout as u32,
-                    output.value.to_sat(),
-                    output.script_pubkey.clone(),
-                );
-
-                retained.push(retain);
-                bitcoin
-            })
-            .collect::<Vec<BitcoinOutput>>();
-
+        
         let inputs = transaction
             .output
             .iter()
