@@ -1,7 +1,7 @@
+
 use quantom_value::Retain;
 
 use crate::{
-    bitcoinoutputqpinput::BitcoinOutput,
     bitcoinpayload::BitcoinPayload,
     observebitcointransaction::ObservedBitcoinTransaction,
     qpoutputsbitcoininput::BitcoinInput,
@@ -25,7 +25,6 @@ impl BitcoinUTXOCollector {
         let transaction = &observed.transaction;
         let mut retained = Vec::new();
 
-        
         let inputs = transaction
             .output
             .iter()
@@ -66,6 +65,9 @@ impl BitcoinUTXOCollector {
             );
         }
 
-        Ok((BitcoinPayload::new(inputs, outputs), retained))
+        Ok((
+            BitcoinPayload::new(inputs, Vec::new()),
+            retained,
+        ))
     }
 }
