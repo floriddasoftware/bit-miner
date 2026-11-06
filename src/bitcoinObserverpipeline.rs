@@ -4,8 +4,7 @@ use qp_hd::commands::{
     qtm_open_manifold_until,
     PersistedEvent,
 };
-use quantom_value::{QuantPerm, Retain};
-
+use quantom_value::QuantPerm;
 use crate::{
     bitcoinpayload::BitcoinPayload,
     bitcoinutxocollector::BitcoinUTXOCollector,
@@ -20,14 +19,12 @@ use crate::{
     settlement::{SettlementEngine, SettlementError},
     sharedtypes::SettlementState,
 };
-
 pub struct BitcoinObservationPipeline {
     utxo: BitcoinUTXOCollector,
     pub miner: Miner,
     pub electrum: ElectrumBroadcastService,
     chain: RenderState,
 }
-
 impl BitcoinObservationPipeline {
     #[inline(always)]
     pub fn new(
@@ -38,7 +35,6 @@ impl BitcoinObservationPipeline {
             substrate: substrate.to_owned(),
             activation,
         };
-
         Ok(Self {
             utxo: BitcoinUTXOCollector::new(),
             miner: Miner::new(clip),
@@ -46,40 +42,34 @@ impl BitcoinObservationPipeline {
             chain: RenderState::window(substrate.to_owned()),
         })
     }
-
     #[inline(always)]
     pub fn miner_mut(&mut self) -> &mut Miner {
         &mut self.miner
     }
-
     #[inline(always)]
     pub fn miner(&self) -> &Miner {
         &self.miner
     }
-
     #[inline(always)]
     pub fn render_state(&self) -> &RenderState {
         &self.chain
     }
-
     #[inline(always)]
     pub fn render_state_mut(&mut self) -> &mut RenderState {
         &mut self.chain
     }
-
     #[inline(always)]
     pub fn process(
         &mut self,
         substrate: &str,
         observed: ObservedBitcoinTransaction,
     ) -> Result<
-        Option<(FinalizedSettlement, Vec<Retain>, [u8; 32])>,
+        Option<(FinalizedSettlement, u128, [u8; 32])>,
         SettlementError,
     > {
         if !self.chain.active {
             return Ok(None);
         }
-
         let activation = self
             .miner
             .clip(substrate)
@@ -89,17 +79,14 @@ impl BitcoinObservationPipeline {
                     "no active miner clip for substrate {substrate}"
                 ))
             })?;
-
         let current = qtm_open_manifold_until(
             substrate,
             activation,
         );
-
-        let (bitcoin, retained) = self.bitcoin_payload(
+        let (bitcoin, retained_mass) = self.bitcoin_payload(
             &observed,
             &current.state,
         )?;
-
         // The pipeline owns the submission budget.
         let budget = load_budget(substrate)
             .map_err(|error| {
@@ -107,14 +94,12 @@ impl BitcoinObservationPipeline {
                     "failed to load submission budget: {error}"
                 ))
             })?;
-
         let submissions = self
             .miner
             .submissions
             .get(substrate)
             .copied()
             .unwrap_or(0);
-
         if submissions >= budget.max_events {
             return Err(SettlementError::Backend(format!(
                 "submission budget exhausted: substrate={} activation={} submissions={} max_events={}",
@@ -124,7 +109,6 @@ impl BitcoinObservationPipeline {
                 budget.max_events,
             )));
         }
-
         // Submit only after the pipeline approves the budget.
         let depth = self
             .miner
@@ -134,12 +118,10 @@ impl BitcoinObservationPipeline {
                     "miner submission failed: {error}"
                 ))
             })?;
-
         let persisted = load_event_at_activation(
             substrate,
             activation,
         );
-
         let mut event = match persisted {
             PersistedEvent::Transit(event) => event,
             PersistedEvent::Exile(_) => {
@@ -148,14 +130,11 @@ impl BitcoinObservationPipeline {
                 ));
             }
         };
-
         event.depth = depth;
-
         let locked = qp_hd::protocol_id::LockedStructure {
             dimension: event.heritage.state.dimension(),
             structural_value: event.heritage.state.structural_value(),
         };
-
         let event_receipt = EventReceipt::new(
             event,
             SettlementState::Pending,
@@ -164,41 +143,37 @@ impl BitcoinObservationPipeline {
         .map_err(|error| {
             SettlementError::Backend(error.to_string())
         })?;
-
         self.advance_materialized(
             substrate,
             bitcoin,
-            retained,
+            retained_mass,
             event_receipt,
             observed,
         )
     }
-
     #[inline(always)]
     pub fn bitcoin_payload(
         &mut self,
         observed: &ObservedBitcoinTransaction,
         manifold: &QuantPerm,
-    ) -> Result<(BitcoinPayload, Vec<Retain>), SettlementError> {
+    ) -> Result<(BitcoinPayload, u128), SettlementError> {
         self.utxo.collect(observed, manifold)
     }
-
     #[inline(always)]
     pub fn advance_materialized(
         &mut self,
         substrate: &str,
         bitcoin: BitcoinPayload,
-        retained: Vec<Retain>,
+        retained_mass: u128,
         event_receipt: EventReceipt,
         observed: ObservedBitcoinTransaction,
     ) -> Result<
-        Option<(FinalizedSettlement, Vec<Retain>, [u8; 32])>,
+        Option<(FinalizedSettlement, u128, [u8; 32])>,
         SettlementError,
     > {
         if !self.chain.active {
             return Ok(None);
         }
-
         if bitcoin.inputs.len() != observed.transaction.output.len() {
             return Err(SettlementError::Backend(format!(
                 "materialized input cardinality changed: inputs={} observed_outputs={}",
@@ -206,12 +181,9 @@ impl BitcoinObservationPipeline {
                 observed.transaction.output.len(),
             )));
         }
-
         let commitment = event_receipt.event.qtm.commitment;
-
         let finalized = SettlementEngine::new(substrate)
             .process(event_receipt, bitcoin, observed)?;
-
-        Ok(Some((finalized, retained, commitment)))
+        Ok(Some((finalized, retained_mass, commitment)))
     }
 }
