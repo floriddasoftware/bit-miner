@@ -141,52 +141,26 @@ impl SettlementEngine {
 pub fn process(
     &self,
     receipt: EventReceipt,
-    mut bitcoin: BitcoinPayload,
+    bitcoin: BitcoinPayload,
     observed: ObservedBitcoinTransaction,
 ) -> Result<FinalizedSettlement, SettlementError> {
     let manifold = &receipt.event.heritage.state;
-    let private_key: [u8; 32] = receipt.event.qtm.coordinate;
-    if bitcoin.outputs.is_empty() {
-        return Err(SettlementError::Unsupported(
-            "cannot materialize a transaction without outputs",
-        ));
-    }
-    let mut transaction = Self::materialize(
+
+    let transaction = Self::materialize(
         manifold,
-        bitcoin.clone(),
-        observed.clone(),
+        bitcoin,
+        observed,
     )?;
-    for (index, input) in bitcoin.inputs.iter_mut().enumerate() {
-    let previous_output = transaction
-        .output
-        .get(input.previous_output.vout as usize)
-        .ok_or_else(|| {
-            SettlementError::Backend(format!(
-                "previous output not found for input {}: vout={}",
-                index,
-                input.previous_output.vout,
-            ))
-        })?;
-        input
-            .sign(
-                manifold,
-                private_key,
-                &transaction,
-                index,
-                previous_output.value.to_sat(),
-                &previous_output.script_pubkey,
-            )
-            .map_err(|error| {
-                SettlementError::Backend(error.to_string())
-            })?;
-        transaction.input[index].witness = input.witness.clone();
-    }
+
     let receipt = Self::settle(receipt)?;
+
     Ok(FinalizedSettlement::new(
         Some(receipt),
         transaction,
     ))
 }
+
+
     #[inline(always)]
     pub fn proceed(
         &self,
