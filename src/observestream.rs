@@ -14,6 +14,7 @@ use tokio_tungstenite::{
     MaybeTlsStream,
     WebSocketStream,
 };
+
 use crate::{
     broadcast::FinalizedSettlement,
     observebitcointransaction::ObservedBitcoinTransaction,
