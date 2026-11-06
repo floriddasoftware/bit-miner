@@ -195,7 +195,7 @@ impl BitcoinObservationPipeline {
                 observed.clone(),
             )?;
         for (index, input) in bitcoin.inputs.iter_mut().enumerate() {
-            let previous_output = finalized
+            let previous_output = observed
                 .transaction
                 .output
                 .get(input.previous_output.vout as usize)
