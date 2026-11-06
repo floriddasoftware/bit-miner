@@ -80,15 +80,23 @@ impl ObservedBitcoinTransaction {
     ) -> ObservationResult<Self> {
         let coordinate = Qtm::derive_coordinate(manifold);
 
-        let fee = u64::try_from(payload.fee_mass(manifold))
-            .map_err(|error| {
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    format!(
-                        "Bitcoin fee exceeds supported range: {error}"
-                    ),
-                )
-            })?;
+        let fee_mass = payload.fee_mass(manifold);
+
+let fee = u64::try_from(fee_mass)
+    .map_err(|error| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "Bitcoin fee exceeds supported range: {error}"
+            ),
+        )
+    })?;
+
+eprintln!(
+    "[bitcoin-retain] fee_mass={} fee_sat={}",
+    fee_mass,
+    fee,
+);
 
         for output in &mut payload.outputs {
             output.assign(manifold, coordinate)?;
