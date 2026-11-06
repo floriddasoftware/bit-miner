@@ -76,8 +76,19 @@ pub fn new_transact(
     let retained_input = payload
         .inputs
         .iter()
-        .map(|input| input.retained(manifold).mass)
-        .fold(0u128, u128::saturating_add);
+        .enumerate()
+        .fold(0u128, |total, (index, input)| {
+            let retained = input.retained(manifold).mass;
+            eprintln!(
+                "[bitcoin-retain] input index={} retained={}",
+                index, retained
+            );
+            total.saturating_add(retained)
+        });
+    eprintln!(
+        "[bitcoin-retain] input_total={}",
+        retained_input
+    );
     let fee = u64::try_from(payload.fee_mass(manifold))
         .map_err(|error| {
             std::io::Error::new(
@@ -101,16 +112,35 @@ pub fn new_transact(
                 "Settlement value is insufficient for fee",
             )
         })?;
+    eprintln!(
+        "[bitcoin-retain] fee={} settlement_value={}",
+        fee, settlement_value
+    );
     if let Some(output) = payload.outputs.last_mut() {
         output.value = settlement_value;
         output.assign(manifold, coordinate)?;
     }
-    let _retained_output = payload
+    let retained_output = payload
         .outputs
         .iter()
-        .map(|output| output.retained(manifold).mass)
-        .fold(0u128, u128::saturating_add);
-    let _replay_mass = payload.replay_mass(manifold);
+        .enumerate()
+        .fold(0u128, |total, (index, output)| {
+            let retained = output.retained(manifold).mass;
+            eprintln!(
+                "[bitcoin-retain] output index={} value={} retained={}",
+                index, output.value, retained
+            );
+            total.saturating_add(retained)
+        });
+    eprintln!(
+        "[bitcoin-retain] output_total={}",
+        retained_output
+    );
+    let replay_retained = payload.replay_mass(manifold);
+    eprintln!(
+        "[bitcoin-retain] replay_retained={}",
+        replay_retained
+    );
     let inputs = payload
         .inputs
         .into_iter()
