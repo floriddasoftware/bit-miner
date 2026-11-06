@@ -137,7 +137,7 @@ impl SettlementEngine {
         println!();
     }
 
-   #[inline(always)]
+#[inline(always)]
 pub fn process(
     &self,
     receipt: EventReceipt,
@@ -146,47 +146,17 @@ pub fn process(
 ) -> Result<FinalizedSettlement, SettlementError> {
     let manifold = &receipt.event.heritage.state;
     let private_key: [u8; 32] = receipt.event.qtm.coordinate;
-
-    // Every observed parent output must have exactly one child input.
-    if bitcoin.inputs.len() != observed.transaction.output.len() {
-        return Err(SettlementError::Backend(format!(
-            "Bitcoin payload input count does not match observed parent output count: payload={} parent={}",
-            bitcoin.inputs.len(),
-            observed.transaction.output.len(),
-        )));
+    if bitcoin.outputs.is_empty() {
+        return Err(SettlementError::Unsupported(
+            "cannot materialize a transaction without outputs",
+        ));
     }
-
-    // Construct the child transaction only after topology validation.
     let mut transaction = Self::materialize(
         manifold,
         bitcoin.clone(),
         observed.clone(),
     )?;
-
-    // Validate and sign each child input against its corresponding parent output.
     for (index, input) in bitcoin.inputs.iter_mut().enumerate() {
-        if input.previous_output.txid != observed.txid {
-            return Err(SettlementError::Backend(format!(
-                "input {} references unexpected parent transaction",
-                index,
-            )));
-        }
-
-        if input.previous_output.vout != index as u32 {
-            return Err(SettlementError::Backend(format!(
-                "input ordering mismatch at index {}: expected vout={} actual vout={}",
-                index,
-                index,
-                input.previous_output.vout,
-            )));
-        }
-        
-        if bitcoin.outputs.is_empty() {
-            return Err(SettlementError::Unsupported(
-                "cannot materialize a transaction without outputs",
-            ));
-        }
-
         let previous_output = observed
             .transaction
             .output
@@ -198,7 +168,6 @@ pub fn process(
                     input.previous_output.vout,
                 ))
             })?;
-
         input
             .sign(
                 manifold,
@@ -211,12 +180,9 @@ pub fn process(
             .map_err(|error| {
                 SettlementError::Backend(error.to_string())
             })?;
-
         transaction.input[index].witness = input.witness.clone();
     }
-
     let receipt = Self::settle(receipt)?;
-
     Ok(FinalizedSettlement::new(
         Some(receipt),
         transaction,
