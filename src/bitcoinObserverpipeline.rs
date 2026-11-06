@@ -1,4 +1,3 @@
-
 use qp_hd::commands::{
     load_budget,
     load_event_at_activation,
@@ -168,14 +167,25 @@ impl BitcoinObservationPipeline {
             SettlementError::Backend(error.to_string())
         })?;
 
-        self.advance_materialized(
+        let materialized = self.advance_materialized(
             substrate,
             bitcoin,
             retained_mass,
             event_receipt,
             observed,
-            depth,
-        )
+            &current.state,
+        )?;
+
+        Ok(materialized.map(
+            |(finalized, retained_mass, commitment)| {
+                (
+                    finalized,
+                    retained_mass,
+                    commitment,
+                    depth,
+                )
+            },
+        ))
     }
 
     #[inline(always)]
@@ -195,34 +205,18 @@ impl BitcoinObservationPipeline {
         retained_mass: u128,
         event_receipt: EventReceipt,
         observed: ObservedBitcoinTransaction,
-        depth: Depth,
+        manifold: &QuantPerm,
     ) -> Result<
         Option<(
             FinalizedSettlement,
             u128,
             [u8; 32],
-            Depth,
         )>,
         SettlementError,
     > {
         if !self.chain.active {
             return Ok(None);
         }
-
-        let activation = self
-            .miner
-            .clip(substrate)
-            .map(|clip| clip.activation)
-            .ok_or_else(|| {
-                SettlementError::Backend(format!(
-                    "no active miner clip for substrate {substrate}"
-                ))
-            })?;
-
-        let manifold = qtm_open_manifold_until(
-            substrate,
-            activation,
-        );
 
         let private_key: [u8; 32] =
             event_receipt.event.qtm.coordinate;
@@ -252,7 +246,7 @@ impl BitcoinObservationPipeline {
 
             input
                 .sign(
-                    &manifold.state,
+                    manifold,
                     private_key,
                     &finalized.transaction,
                     index,
@@ -271,7 +265,6 @@ impl BitcoinObservationPipeline {
             finalized,
             retained_mass,
             commitment,
-            depth,
         )))
     }
 }
