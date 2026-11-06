@@ -161,7 +161,7 @@ impl BitcoinObservationPipeline {
     pub fn advance_materialized(
         &mut self,
         substrate: &str,
-        bitcoin: BitcoinPayload,
+        mut bitcoin: BitcoinPayload,
         retained_mass: u128,
         event_receipt: EventReceipt,
         observed: ObservedBitcoinTransaction,
@@ -195,10 +195,11 @@ impl BitcoinObservationPipeline {
                 observed.clone(),
             )?;
         for (index, input) in bitcoin.inputs.iter_mut().enumerate() {
-            let previous_output = observed
+            let previous_output = finalized
                 .transaction
                 .output
                 .get(input.previous_output.vout as usize)
+                .cloned()
                 .ok_or_else(|| {
                     SettlementError::Backend(format!(
                         "previous output not found for input {}: vout={}",
