@@ -1,4 +1,5 @@
 use crate::{
+bitcoinoutputqpinput::BitcoinOutput,
 bitcoinpayload::BitcoinPayload,
 observebitcointransaction::ObservedBitcoinTransaction,
 qpoutputsbitcoininput::BitcoinInput,
@@ -55,7 +56,16 @@ pub fn collect(
             input.previous_output.vout,
         );
     }
-    let payload = BitcoinPayload::new(inputs, Vec::new());
+    let (settlement_output, _) = BitcoinOutput::new(
+        manifold,
+        0,
+        0,
+        bitcoin::ScriptBuf::new(),
+    );
+    let payload = BitcoinPayload::new(
+        inputs,
+        vec![settlement_output],
+    );
     let retained = payload.replay_mass(manifold);
     Ok((payload, retained))
 }
