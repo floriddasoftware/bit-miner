@@ -1,9 +1,7 @@
-
 use std::{
     error::Error,
     fmt,
 };
-
 use bitcoin::{
     hashes::Hash,
     secp256k1::{
@@ -23,9 +21,7 @@ use bitcoin::{
 use bitcoin::sighash::SighashCache;
 use quantom_value::{QuantPerm, Retain};
 use qtm_graph::graph::frame::{Depth, Direction};
-
 use crate::bitcoinpayload::PayloadComponent;
-
 #[derive(Debug)]
 pub enum SigningError {
     InputIndexOutOfRange {
@@ -42,7 +38,6 @@ pub enum SigningError {
     Sighash(String),
     InvalidMessage(String),
 }
-
 impl fmt::Display for SigningError {
     fn fmt(
         &self,
@@ -80,9 +75,7 @@ impl fmt::Display for SigningError {
         }
     }
 }
-
 impl Error for SigningError {}
-
 #[repr(C)]
 #[derive(Clone, Debug)]
 pub struct BitcoinInput {
@@ -91,7 +84,6 @@ pub struct BitcoinInput {
     pub witness: Witness,
     pub sequence: Sequence,
 }
-
 impl BitcoinInput {
     #[inline(always)]
     fn byte_mass(&self, bytes: &[u8]) -> u128 {
@@ -99,12 +91,10 @@ impl BitcoinInput {
             mass.saturating_add(u128::from(*byte))
         })
     }
-
     #[inline(always)]
     fn hash_mass(&self, bytes: &[u8]) -> u128 {
         self.byte_mass(bytes)
     }
-
     #[inline(always)]
     fn previous_output_mass(&self) -> u128 {
         self.hash_mass(
@@ -115,14 +105,12 @@ impl BitcoinInput {
         )
         .saturating_add(u128::from(self.previous_output.vout))
     }
-
     #[inline(always)]
     fn witness_mass(&self) -> u128 {
         self.witness.iter().fold(0u128, |mass, item| {
             mass.saturating_add(self.byte_mass(item))
         })
     }
-
     #[inline(always)]
     fn payload_mass(&self) -> u128 {
         self.previous_output_mass()
@@ -131,7 +119,6 @@ impl BitcoinInput {
             )
             .saturating_add(self.witness_mass())
     }
-
     #[inline(always)]
     pub fn new(
         manifold: &QuantPerm,
@@ -146,12 +133,9 @@ impl BitcoinInput {
             witness,
             sequence,
         };
-
         let retained = input.deep(manifold, "qp/payload", 0);
-
         (input, retained)
     }
-
     #[inline]
     pub fn sign(
         &mut self,
@@ -169,7 +153,6 @@ impl BitcoinInput {
                     input_count: transaction.input.len(),
                 },
             )?;
-
         if transaction_input.previous_output != self.previous_output {
             return Err(
                 SigningError::PreviousOutputMismatch {
@@ -177,26 +160,19 @@ impl BitcoinInput {
                 },
             );
         }
-
         let secret_key =
             SecretKey::from_slice(&private_key).map_err(|error| {
                 SigningError::InvalidPrivateKey(error.to_string())
             })?;
-
         let secp = Secp256k1::new();
-
         let secp_public_key =
             SecpPublicKey::from_secret_key(&secp, &secret_key);
-
         let public_key = PublicKey::new(secp_public_key);
         let public_key_bytes = public_key.to_bytes();
-
         let pubkey_hash =
             bitcoin::WPubkeyHash::hash(&public_key_bytes);
-
         let expected_script =
             ScriptBuf::new_p2wpkh(&pubkey_hash);
-
         if previous_output_script != &expected_script {
             return Err(
                 SigningError::PreviousOutputScriptMismatch {
@@ -204,21 +180,16 @@ impl BitcoinInput {
                 },
             );
         }
-
-        let script_code =
-            ScriptBuf::new_p2pkh(&public_key.pubkey_hash());
-
         let sighash = SighashCache::new(transaction)
             .p2wpkh_signature_hash(
                 input_index,
-                &script_code,
+                previous_output_script,
                 Amount::from_sat(previous_output_value),
                 EcdsaSighashType::All,
             )
             .map_err(|error| {
                 SigningError::Sighash(error.to_string())
             })?;
-
         let message =
             Message::from_slice(&sighash.to_byte_array())
                 .map_err(|error| {
@@ -226,22 +197,17 @@ impl BitcoinInput {
                         error.to_string(),
                     )
                 })?;
-
         let signature =
             secp.sign_ecdsa(&message, &secret_key);
-
         let mut signature_bytes =
             signature.serialize_der().to_vec();
-
         signature_bytes.push(
             EcdsaSighashType::All as u8,
         );
-
         self.witness = Witness::from_slice(&[
             signature_bytes.as_slice(),
             public_key_bytes.as_slice(),
         ]);
-
         Ok(self.deep(
             manifold,
             "qp/payload",
@@ -249,7 +215,6 @@ impl BitcoinInput {
         ))
     }
 }
-
 impl PayloadComponent for BitcoinInput {
     #[inline(always)]
     fn deep(
@@ -259,7 +224,6 @@ impl PayloadComponent for BitcoinInput {
         position: usize,
     ) -> Retain {
         let mut depth = Depth::new("qp/payload");
-
         depth.insert(
             "previous_output",
             position,
@@ -268,7 +232,6 @@ impl PayloadComponent for BitcoinInput {
                 manifold.dimension(),
             ),
         );
-
         depth.insert(
             "script_sig",
             position.saturating_add(1),
@@ -277,7 +240,6 @@ impl PayloadComponent for BitcoinInput {
                 manifold.dimension(),
             ),
         );
-
         depth.insert(
             "witness",
             position.saturating_add(2),
@@ -286,10 +248,8 @@ impl PayloadComponent for BitcoinInput {
                 manifold.dimension(),
             ),
         );
-
         Direction::realize_depth(manifold, &depth)
     }
-
     #[inline(always)]
     fn retained(
         &self,
