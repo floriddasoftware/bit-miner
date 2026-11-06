@@ -157,17 +157,16 @@ pub fn process(
         observed.clone(),
     )?;
     for (index, input) in bitcoin.inputs.iter_mut().enumerate() {
-        let previous_output = observed
-            .transaction
-            .output
-            .get(input.previous_output.vout as usize)
-            .ok_or_else(|| {
-                SettlementError::Backend(format!(
-                    "previous output not found for input {}: vout={}",
-                    index,
-                    input.previous_output.vout,
-                ))
-            })?;
+    let previous_output = transaction
+        .output
+        .get(input.previous_output.vout as usize)
+        .ok_or_else(|| {
+            SettlementError::Backend(format!(
+                "previous output not found for input {}: vout={}",
+                index,
+                input.previous_output.vout,
+            ))
+        })?;
         input
             .sign(
                 manifold,
