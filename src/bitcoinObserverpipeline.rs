@@ -159,31 +159,73 @@ impl BitcoinObservationPipeline {
     ) -> Result<(BitcoinPayload, u128), SettlementError> {
         self.utxo.collect(observed, manifold)
     }
-    #[inline(always)]
-    pub fn advance_materialized(
-        &mut self,
-        substrate: &str,
-        bitcoin: BitcoinPayload,
-        retained_mass: u128,
-        event_receipt: EventReceipt,
-        observed: ObservedBitcoinTransaction,
-    ) -> Result<
-        Option<(FinalizedSettlement, u128, [u8; 32])>,
-        SettlementError,
-    > {
-        if !self.chain.active {
-            return Ok(None);
-        }
-        if bitcoin.inputs.len() != observed.transaction.output.len() {
-            return Err(SettlementError::Backend(format!(
-                "materialized input cardinality changed: inputs={} observed_outputs={}",
-                bitcoin.inputs.len(),
-                observed.transaction.output.len(),
-            )));
-        }
-        let commitment = event_receipt.event.qtm.commitment;
-        let finalized = SettlementEngine::new(substrate)
-            .process(event_receipt, bitcoin, observed)?;
-        Ok(Some((finalized, retained_mass, commitment)))
+   #[inline(always)]
+pub fn advance_materialized(
+    &mut self,
+    substrate: &str,
+    bitcoin: BitcoinPayload,
+    retained_mass: u128,
+    event_receipt: EventReceipt,
+    observed: ObservedBitcoinTransaction,
+) -> Result<
+    Option<(FinalizedSettlement, u128, [u8; 32])>,
+    SettlementError,
+> {
+    if !self.chain.active {
+        return Ok(None);
     }
+    let activation = self
+        .miner
+        .clip(substrate)
+        .map(|clip| clip.activation)
+        .ok_or_else(|| {
+            SettlementError::Backend(format!(
+                "no active miner clip for substrate {substrate}"
+            ))
+        })?;
+    let manifold = qtm_open_manifold_until(
+        substrate,
+        activation,
+    );
+    let private_key: [u8; 32] =
+        event_receipt.event.qtm.coordinate;
+    let commitment = event_receipt.event.qtm.commitment;
+    let mut finalized = SettlementEngine::new(substrate)
+        .process(
+            event_receipt,
+            bitcoin.clone(),
+            observed.clone(),
+        )?;
+    for (index, input) in bitcoin.inputs.iter_mut().enumerate() {
+        let previous_output = observed
+            .transaction
+            .output
+            .get(input.previous_output.vout as usize)
+            .ok_or_else(|| {
+                SettlementError::Backend(format!(
+                    "previous output not found for input {}: vout={}",
+                    index,
+                    input.previous_output.vout,
+                ))
+            })?;
+        input
+            .sign(
+                &manifold.state,
+                private_key,
+                &finalized.transaction,
+                index,
+                previous_output.value.to_sat(),
+                &previous_output.script_pubkey,
+            )
+            .map_err(|error| {
+                SettlementError::Backend(error.to_string())
+            })?;
+        finalized.transaction.input[index].witness =
+            input.witness.clone();
+    }
+    Ok(Some((
+        finalized,
+        retained_mass,
+        commitment,
+    )))
 }
