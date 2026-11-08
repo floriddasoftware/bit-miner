@@ -161,25 +161,64 @@ pub fn process(
 }
 
     #[inline(always)]
-    pub fn proceed(
-        &self,
-        receipt: SettlementReceipt,
-        bitcoin: BitcoinPayload,
-        observed: ObservedBitcoinTransaction,
-    ) -> Result<FinalizedSettlement, SettlementError> {
-        let manifold = &receipt.event.heritage.state;
+pub fn proceed(
+    &self,
+    receipt: SettlementReceipt,
+    bitcoin: BitcoinPayload,
+    observed: ObservedBitcoinTransaction,
+) -> Result<FinalizedSettlement, SettlementError> {
+    let manifold = &receipt.event.heritage.state;
+    let coordinate = receipt.event.qtm.coordinate;
 
-        let transaction = Self::materialize(
-            manifold,
-            bitcoin,
-            observed,
-        )?;
+    let mut inputs = bitcoin.inputs.clone();
 
-        Ok(FinalizedSettlement::new(
-            Some(receipt),
-            transaction,
-        ))
+    let assigned_output = observed
+        .transaction
+        .output
+        .get(0)
+        .ok_or(SettlementError::Unsupported(
+            "assigned settlement output vout=0 is missing",
+        ))?;
+
+    let previous_output_value = assigned_output.value.to_sat();
+    let previous_output_script =
+        assigned_output.script_pubkey.clone();
+
+    let mut materialized = Self::materialize(
+        manifold,
+        bitcoin,
+        observed,
+    )?;
+
+    if inputs.len() != materialized.input.len() {
+        return Err(SettlementError::Unsupported(
+            "payload input count does not match materialized transaction",
+        ));
     }
+
+    for (index, input) in inputs.iter_mut().enumerate() {
+        input
+            .sign(
+                manifold,
+                coordinate,
+                &materialized,
+                index,
+                previous_output_value,
+                &previous_output_script,
+            )
+            .map_err(|error| {
+                SettlementError::Backend(error.to_string())
+            })?;
+
+        materialized.input[index].witness =
+            input.witness.clone();
+    }
+
+    Ok(FinalizedSettlement::new(
+        Some(receipt),
+        materialized,
+    ))
+}
 
     #[inline(always)]
     pub fn coinbase(
