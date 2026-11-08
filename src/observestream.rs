@@ -331,6 +331,8 @@ async fn fetch_decode<T: Decodable>(
     Ok(bitcoin::consensus::deserialize::<T>(&raw)?)
 }
 
+
+
 /// Finalizes the observation and publishes its settlement.
 #[inline(always)]
 pub fn refresh(
@@ -338,7 +340,10 @@ pub fn refresh(
     substrate: &str,
     observed: ObservedBitcoinTransaction,
 ) -> PipelineOutcome {
-    let outcome = pipeline.process(substrate, observed)?;
+    let outcome = pipeline.process(
+        substrate,
+        observed.clone(),
+    )?;
 
     let Some((
         finalized,
@@ -348,6 +353,28 @@ pub fn refresh(
     )) = outcome else {
         return Ok(None);
     };
+
+    let receipt = finalized.receipt.as_ref().ok_or(
+        SettlementError::Unsupported(
+            "cannot proceed without a settlement receipt",
+        ),
+    )?;
+
+    let manifold = &receipt.event.heritage.state;
+
+    let proceed_observed =
+        ObservedBitcoinTransaction::from_transaction(
+            finalized.transaction.clone(),
+            observed.source,
+        );
+
+    let (bitcoin, _) = pipeline.bitcoin_payload(
+        &proceed_observed,
+        manifold,
+    )?;
+
+    let finalized = SettlementEngine::new(substrate)
+        .proceed(finalized, bitcoin)?;
 
     // The returned txid confirms local queue acceptance only.
     let electrum_txid = pipeline
@@ -364,8 +391,7 @@ pub fn refresh(
         electrum_txid,
     );
 
-    // Publish wire packets using the exact commitment from the
-    // event finalized by pipeline.process().
+    // Publish packets from the transaction returned by proceed().
     let wire_packets = finalized.wire_packets(commitment);
 
     for wire_packet in wire_packets {
