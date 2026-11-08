@@ -99,9 +99,23 @@ impl ObservedBitcoinTransaction {
             fee_mass,
         );
 
-        for output in &mut payload.outputs {
-            output.assign(manifold, coordinate)?;
-        }
+        let output = payload
+            .outputs
+            .iter_mut()
+            .find(|output| output.vout == 0)
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "Settlement spread output vout=0 not found",
+                )
+            })?;
+
+        let assigned = output.assign(manifold, coordinate)?;
+
+        eprintln!(
+            "[bitcoin-retain] assigned_output vout=0 retained_mass={}",
+            assigned.mass,
+        );
 
         let retained_output = payload
             .outputs
@@ -111,8 +125,9 @@ impl ObservedBitcoinTransaction {
                 let retained = output.retained(manifold).mass;
 
                 eprintln!(
-                    "[bitcoin-retain] output index={} value_sat={} retained_mass={}",
+                    "[bitcoin-retain] output index={} vout={} value_sat={} retained_mass={}",
                     index,
+                    output.vout,
                     output.value,
                     retained,
                 );
