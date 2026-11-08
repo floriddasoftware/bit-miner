@@ -1,4 +1,5 @@
-use bitcoin::Txid;
+
+use bitcoin::{Amount, Txid};
 use quantom_value::QuantPerm;
 use qp_hd::protocolvalue::Qtm;
 
@@ -27,21 +28,23 @@ pub struct ObservedBitcoinTransaction {
     pub txid: Txid,
     pub transaction: bitcoin::Transaction,
     pub coinbase: bool,
-    /// Fee from the block template; None if only network-observed.
+    /// Fee quantity derived from the retained payload.
     pub fee: Option<u64>,
-    /// Weight from the block template; None if only network-observed.
+    /// Weight from the block template; None if unavailable.
     pub weight: Option<u64>,
     /// Zero-based indexes into the template transaction list.
     /// Bitcoin Core supplies these indexes as one-based values.
     pub depends: Option<Vec<usize>>,
     /// Original zero-based position in the template.
-    /// None if only network-observed.
+    /// None if unavailable.
     pub template_index: Option<usize>,
 }
 
 impl ObservedBitcoinTransaction {
     #[inline(always)]
-    pub fn is_coinbase(transaction: &bitcoin::Transaction) -> bool {
+    pub fn is_coinbase(
+        transaction: &bitcoin::Transaction,
+    ) -> bool {
         transaction.input.len() == 1
             && transaction.input[0].previous_output.is_null()
     }
@@ -82,21 +85,19 @@ impl ObservedBitcoinTransaction {
 
         let fee_mass = payload.fee_mass(manifold);
 
-let fee = u64::try_from(fee_mass)
-    .map_err(|error| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            format!(
-                "Bitcoin fee exceeds supported range: {error}"
-            ),
-        )
-    })?;
+        let fee = u64::try_from(fee_mass).map_err(|error| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "Retained fee quantity exceeds supported range: {error}"
+                ),
+            )
+        })?;
 
-eprintln!(
-    "[bitcoin-retain] fee_mass={} fee_sat={}",
-    fee_mass,
-    fee,
-);
+        eprintln!(
+            "[bitcoin-retain] fee_mass={}",
+            fee_mass,
+        );
 
         for output in &mut payload.outputs {
             output.assign(manifold, coordinate)?;
@@ -110,7 +111,7 @@ eprintln!(
                 let retained = output.retained(manifold).mass;
 
                 eprintln!(
-                    "[bitcoin-retain] output index={} value={} retained={}",
+                    "[bitcoin-retain] output index={} value_sat={} retained_mass={}",
                     index,
                     output.value,
                     retained,
@@ -120,7 +121,7 @@ eprintln!(
             });
 
         eprintln!(
-            "[bitcoin-retain] output_total={}",
+            "[bitcoin-retain] output_total_mass={}",
             retained_output,
         );
 
@@ -132,7 +133,7 @@ eprintln!(
                 let retained = input.retained(manifold).mass;
 
                 eprintln!(
-                    "[bitcoin-retain] input index={} previous_txid={} previous_vout={} retained={}",
+                    "[bitcoin-retain] input index={} previous_txid={} previous_vout={} retained_mass={}",
                     index,
                     input.previous_output.txid,
                     input.previous_output.vout,
@@ -143,14 +144,14 @@ eprintln!(
             });
 
         eprintln!(
-            "[bitcoin-retain] input_total={}",
+            "[bitcoin-retain] input_total_mass={}",
             retained_input,
         );
 
         let replay_retained = payload.replay_mass(manifold);
 
         eprintln!(
-            "[bitcoin-retain] replay_retained={}",
+            "[bitcoin-retain] replay_retained_mass={}",
             replay_retained,
         );
 
@@ -169,7 +170,7 @@ eprintln!(
             .outputs
             .into_iter()
             .map(|output| bitcoin::TxOut {
-                value: bitcoin::Amount::from_sat(output.value),
+                value: Amount::from_sat(output.value),
                 script_pubkey: output.script_pubkey,
             })
             .collect();
