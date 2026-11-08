@@ -144,6 +144,8 @@ pub fn process(
     bitcoin: BitcoinPayload,
     observed: ObservedBitcoinTransaction,
 ) -> Result<FinalizedSettlement, SettlementError> {
+    let receipt = Self::settle(receipt)?;
+
     let manifold = &receipt.event.heritage.state;
 
     let transaction = Self::materialize(
@@ -152,14 +154,11 @@ pub fn process(
         observed,
     )?;
 
-    let receipt = Self::settle(receipt)?;
-
     Ok(FinalizedSettlement::new(
         Some(receipt),
         transaction,
     ))
 }
-
 
     #[inline(always)]
     pub fn proceed(
