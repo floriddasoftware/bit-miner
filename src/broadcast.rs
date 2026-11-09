@@ -56,9 +56,10 @@ impl FinalizedSettlement {
 
     #[inline(always)]
     pub fn script_pubkey(&self) -> Option<&ScriptBuf> {
-        self.receipt
-            .as_ref()
-            .map(|receipt| &receipt.script_pubkey)
+        self.transaction
+            .output
+            .first()
+            .map(|output| &output.script_pubkey)
     }
 
     #[inline]
@@ -77,10 +78,8 @@ impl FinalizedSettlement {
             .collect()
     }
 
-    /// Constructs a packet for an existing transaction output.
-    ///
-    /// The output index determines the value and OutPoint. When a settlement
-    /// receipt exists, its script is the canonical settlement script.
+    /// Constructs a packet using the actual transaction output.
+
     #[inline]
     pub fn wire_packet(
         &self,
@@ -88,19 +87,13 @@ impl FinalizedSettlement {
         commitment: [u8; 32],
     ) -> Option<WirePacket> {
         let output = self.transaction.output.get(vout as usize)?;
-
-        let script_pubkey = self
-            .script_pubkey()
-            .cloned()
-            .unwrap_or_else(|| output.script_pubkey.clone());
-
         Some(WirePacket::new(
             OutPoint {
                 txid: self.txid(),
                 vout,
             },
             output.value.to_sat(),
-            script_pubkey,
+            output.script_pubkey.clone(),
             commitment,
         ))
     }
