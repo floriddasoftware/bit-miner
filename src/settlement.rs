@@ -1,4 +1,3 @@
-
 use bitcoin::Transaction;
 use quantom_value::QuantPerm;
 
@@ -137,29 +136,28 @@ impl SettlementEngine {
         println!();
     }
 
-#[inline(always)]
-pub fn process(
-    &self,
-    receipt: EventReceipt,
-    bitcoin: BitcoinPayload,
-    observed: ObservedBitcoinTransaction,
-) -> Result<FinalizedSettlement, SettlementError> {
-    let receipt = Self::settle(receipt)?;
+    #[inline(always)]
+    pub fn process(
+        &self,
+        receipt: EventReceipt,
+        bitcoin: BitcoinPayload,
+        observed: ObservedBitcoinTransaction,
+    ) -> Result<FinalizedSettlement, SettlementError> {
+        let receipt = Self::settle(receipt)?;
 
-    let manifold = &receipt.event.heritage.state;
+        let manifold = &receipt.event.heritage.state;
 
-    let transaction = Self::materialize(
-        manifold,
-        bitcoin,
-        observed,
-    )?;
+        let transaction = Self::materialize(
+            manifold,
+            bitcoin,
+            observed,
+        )?;
 
-    Ok(FinalizedSettlement::new(
-        Some(receipt),
-        transaction,
-    ))
-}
-
+        Ok(FinalizedSettlement::new(
+            Some(receipt),
+            transaction,
+        ))
+    }
 
     #[inline(always)]
     pub fn coinbase(
@@ -170,27 +168,28 @@ pub fn process(
     }
 
     #[inline(always)]
-fn materialize(
-    manifold: &QuantPerm,
-    bitcoin: BitcoinPayload,
-    observed: ObservedBitcoinTransaction,
-) -> Result<Transaction, SettlementError> {
-    if bitcoin.inputs.is_empty() {
-        return Err(SettlementError::Unsupported(
-            "cannot materialize a transaction without inputs",
-        ));
+    fn materialize(
+        manifold: &QuantPerm,
+        bitcoin: BitcoinPayload,
+        observed: ObservedBitcoinTransaction,
+    ) -> Result<Transaction, SettlementError> {
+        if bitcoin.inputs.is_empty() {
+            return Err(SettlementError::Unsupported(
+                "cannot materialize a transaction without inputs",
+            ));
+        }
+
+        let observed_transaction =
+            ObservedBitcoinTransaction::new_transact(
+                manifold,
+                bitcoin,
+                &observed.transaction,
+                observed.source,
+            )
+            .map_err(|error| {
+                SettlementError::Backend(error.to_string())
+            })?;
+
+        Ok(observed_transaction.transaction)
     }
-
-    let observed_transaction =
-        ObservedBitcoinTransaction::new_transact(
-            manifold,
-            bitcoin,
-            &observed.transaction,
-            observed.source,
-        )
-        .map_err(|error| {
-            SettlementError::Backend(error.to_string())
-        })?;
-
-    Ok(observed_transaction.transaction)
 }
