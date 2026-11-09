@@ -75,13 +75,14 @@ impl ObservedBitcoinTransaction {
         }
     }
 
-    #[inline(always)]
+#[inline(always)]
 pub fn new_transact(
     manifold: &QuantPerm,
     mut payload: BitcoinPayload,
+    previous_transaction: &bitcoin::Transaction,
     source: BitcoinObservationSource,
 ) -> ObservationResult<Self> {
-    let coordinate = Qtm::derive_coordinate(manifold);
+    let coordinate: [u8; 32] = Qtm::derive_coordinate(manifold);
 
     let fee_mass = payload.fee_mass(manifold);
 
@@ -107,14 +108,14 @@ pub fn new_transact(
 
     let original_value = output.value;
 
-output.value = original_value.checked_sub(fee).ok_or_else(|| {
-    std::io::Error::new(
-        std::io::ErrorKind::InvalidInput,
-        format!(
-            "Insufficient settlement output value: value={original_value} sat, fee={fee} sat",
-        ),
-    )
-})?;
+    output.value = original_value.checked_sub(fee).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "Insufficient settlement output value: value={original_value} sat, fee={fee} sat",
+            ),
+        )
+    })?;
 
     eprintln!(
         "[bitcoin-retain] fee_sat={} settlement_value_sat={}->{}",
@@ -123,11 +124,24 @@ output.value = original_value.checked_sub(fee).ok_or_else(|| {
         output.value,
     );
 
-    let assigned = output.assign(manifold, coordinate)?;
+    let (
+        assigned_output,
+        _assigned_input,
+        assigned_input_retained,
+    ) = output.assign(
+        manifold,
+        coordinate,
+        previous_transaction,
+    )?;
 
     eprintln!(
         "[bitcoin-retain] assigned_output retained_mass={}",
-        assigned.mass,
+        assigned_output.mass,
+    );
+
+    eprintln!(
+        "[bitcoin-retain] assigned_input retained_mass={}",
+        assigned_input_retained.mass,
     );
 
     let inputs = payload
@@ -167,12 +181,17 @@ output.value = original_value.checked_sub(fee).ok_or_else(|| {
     Ok(observed)
 }
 
-    #[inline(always)]
-    pub fn new_transaction(
-        manifold: &QuantPerm,
-        payload: BitcoinPayload,
-        source: BitcoinObservationSource,
-    ) -> ObservationResult<Self> {
-        Self::new_transact(manifold, payload, source)
-    }
+#[inline(always)]
+pub fn new_transaction(
+    manifold: &QuantPerm,
+    payload: BitcoinPayload,
+    previous_transaction: &bitcoin::Transaction,
+    source: BitcoinObservationSource,
+) -> ObservationResult<Self> {
+    Self::new_transact(
+        manifold,
+        payload,
+        previous_transaction,
+        source,
+    )
 }
