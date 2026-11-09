@@ -106,7 +106,15 @@ pub fn new_transact(
         })?;
 
     let original_value = output.value;
-    output.value = output.value.saturating_sub(fee);
+
+output.value = original_value.checked_sub(fee).ok_or_else(|| {
+    std::io::Error::new(
+        std::io::ErrorKind::InvalidInput,
+        format!(
+            "Insufficient settlement output value: value={original_value} sat, fee={fee} sat",
+        ),
+    )
+})?;
 
     eprintln!(
         "[bitcoin-retain] fee_sat={} settlement_value_sat={}->{}",
