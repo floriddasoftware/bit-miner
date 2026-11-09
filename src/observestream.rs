@@ -340,15 +340,10 @@ pub fn refresh(
     substrate: &str,
     observed: ObservedBitcoinTransaction,
 ) -> PipelineOutcome {
-    let source = observed.source;
-
-    let outcome = pipeline.process(
-        substrate,
-        observed,
-    )?;
+    let outcome = pipeline.process(substrate, observed)?;
 
     let Some((
-        mut finalized,
+        finalized,
         retained_mass,
         commitment,
         depth,
@@ -356,36 +351,7 @@ pub fn refresh(
         return Ok(None);
     };
 
-    // Recover the canonical receipt produced by process().
-    let receipt = finalized.receipt.take().ok_or(
-        SettlementError::Unsupported(
-            "cannot proceed without a settlement receipt",
-        ),
-    )?;
-
-    // Reconstruct the observation from the transaction already
-    // materialized by process().
-    let proceed_observed =
-        ObservedBitcoinTransaction::from_transaction(
-            finalized.transaction.clone(),
-            source,
-        );
-
-    // Collect the canonical payload from that materialized transaction.
-    let (bitcoin, _) = pipeline.bitcoin_payload(
-        &proceed_observed,
-        &receipt.event.heritage.state,
-    )?;
-
-    // Continue settlement using the receipt and payload derived above.
-    let finalized = SettlementEngine::new(substrate)
-        .proceed(
-            receipt,
-            bitcoin,
-            proceed_observed,
-        )?;
-
-    // The returned txid confirms local queue acceptance only.
+    // Submit the transaction already finalized by process().
     let electrum_txid = pipeline
         .electrum
         .submit(finalized.transaction.clone())
@@ -400,8 +366,7 @@ pub fn refresh(
         electrum_txid,
     );
 
-    // Publish packets from the transaction returned by proceed(),
-    // preserving the commitment from the original pipeline event.
+    // Publish packets from the same finalized transaction.
     let wire_packets = finalized.wire_packets(commitment);
 
     for wire_packet in wire_packets {
