@@ -170,29 +170,27 @@ pub fn process(
     }
 
     #[inline(always)]
-    fn materialize(
-        manifold: &QuantPerm,
-        bitcoin: BitcoinPayload,
-        observed: ObservedBitcoinTransaction,
-    ) -> Result<Transaction, SettlementError> {
-        
-
-        if bitcoin.inputs.is_empty() {
-            return Err(SettlementError::Unsupported(
-                "cannot materialize a transaction without inputs",
-            ));
-        }
-
-        let observed_transaction =
-            ObservedBitcoinTransaction::new_transact(
-                manifold,
-                bitcoin,
-                observed.source,
-            )
-            .map_err(|error| {
-                SettlementError::Backend(error.to_string())
-            })?;
-
-        Ok(observed_transaction.transaction)
+fn materialize(
+    manifold: &QuantPerm,
+    bitcoin: BitcoinPayload,
+    observed: ObservedBitcoinTransaction,
+) -> Result<Transaction, SettlementError> {
+    if bitcoin.inputs.is_empty() {
+        return Err(SettlementError::Unsupported(
+            "cannot materialize a transaction without inputs",
+        ));
     }
+
+    let observed_transaction =
+        ObservedBitcoinTransaction::new_transact(
+            manifold,
+            bitcoin,
+            &observed.transaction,
+            observed.source,
+        )
+        .map_err(|error| {
+            SettlementError::Backend(error.to_string())
+        })?;
+
+    Ok(observed_transaction.transaction)
 }
