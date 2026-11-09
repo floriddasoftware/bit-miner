@@ -1,3 +1,4 @@
+
 use std::{
     env,
     fmt,
@@ -759,7 +760,7 @@ fn parse_peers(key: &str) -> Option<Vec<SocketAddr>> {
 }
 
 // -----------------------------------------------------------------------------
-// Electrum transaction broadcaster — BlueWallet ElectrumX pool
+// Electrum transaction broadcaster
 //
 // This service is independent of QTM WirePacket gossip. Call it from within
 // BitcoinObservationPipeline after the canonical settlement transaction has
@@ -789,36 +790,16 @@ struct ElectrumEndpoint {
     tls: bool,
 }
 
-const BLUEWALLET_ELECTRUM_ENDPOINTS: [ElectrumEndpoint; 6] = [
-    ElectrumEndpoint {
-        host: "electrum1.bluewallet.io",
-        port: 443,
-        tls: true,
-    },
+const ELECTRUM_ENDPOINTS: [ElectrumEndpoint; 2] = [
     ElectrumEndpoint {
         host: "electrum2.bluewallet.io",
         port: 443,
         tls: true,
     },
     ElectrumEndpoint {
-        host: "electrum3.bluewallet.io",
-        port: 443,
+        host: "electrum.blockstream.info",
+        port: 50002,
         tls: true,
-    },
-    ElectrumEndpoint {
-        host: "electrum1.bluewallet.io",
-        port: 50001,
-        tls: false,
-    },
-    ElectrumEndpoint {
-        host: "electrum2.bluewallet.io",
-        port: 50001,
-        tls: false,
-    },
-    ElectrumEndpoint {
-        host: "electrum3.bluewallet.io",
-        port: 50001,
-        tls: false,
     },
 ];
 
@@ -975,7 +956,7 @@ async fn electrum_broadcast_transaction(
 
     let mut endpoints = JoinSet::new();
 
-    for endpoint in BLUEWALLET_ELECTRUM_ENDPOINTS {
+    for endpoint in ELECTRUM_ENDPOINTS {
         let raw_transaction = Arc::clone(&raw_transaction);
         let tls = Arc::clone(&tls);
 
