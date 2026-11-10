@@ -97,20 +97,13 @@ impl BitcoinObservationPipeline {
                 ))
             })?;
 
-        let current = qtm_open_manifold_until(
-            substrate,
-            activation,
-        );
-
-        let (bitcoin, retained_mass) = self.bitcoin_payload(
-            &observed,
-            &current.state,
-        )?;
-
-        let budget = load_budget(substrate)
+        let budget = load_budget(substrate, activation)
             .map_err(|error| {
                 SettlementError::Backend(format!(
-                    "failed to load submission budget: {error}"
+                    "failed to load event budget for substrate={} activation={}: {}",
+                    substrate,
+                    activation,
+                    error,
                 ))
             })?;
 
@@ -130,6 +123,16 @@ impl BitcoinObservationPipeline {
                 budget.max_events,
             )));
         }
+
+        let current = qtm_open_manifold_until(
+            substrate,
+            activation,
+        );
+
+        let (bitcoin, retained_mass) = self.bitcoin_payload(
+            &observed,
+            &current.state,
+        )?;
 
         let depth = self
             .miner
