@@ -1,3 +1,9 @@
+
+use qtm_graph::graph::frame::{
+    Depth,
+    Direction,
+};
+
 use crate::{
     bitcoinoutputqpinput::BitcoinOutput,
     bitcoinpayload::BitcoinPayload,
@@ -21,40 +27,63 @@ impl BitcoinUTXOCollector {
         manifold: &quantom_value::QuantPerm,
     ) -> Result<(BitcoinPayload, u128), SettlementError> {
         let transaction = &observed.transaction;
+        let mut depth = Depth::new("qp/payload");
 
         let inputs = transaction
             .input
             .iter()
-            .map(|txin| {
-                BitcoinInput::new(
+            .enumerate()
+            .map(|(position, txin)| {
+                let (retained, input) = BitcoinInput::new(
                     manifold,
                     txin.previous_output,
                     txin.script_sig.clone(),
                     txin.witness.clone(),
                     txin.sequence,
-                )
-                .1
+                );
+
+                depth.insert(
+                    "input",
+                    position,
+                    retained,
+                );
+
+                input
             })
             .collect::<Vec<BitcoinInput>>();
+
+        let output_offset = inputs.len();
 
         let outputs = transaction
             .output
             .iter()
             .enumerate()
-            .map(|(vout, txout)| {
-                BitcoinOutput::new(
+            .map(|(position, txout)| {
+                let (output, retained) = BitcoinOutput::new(
                     manifold,
-                    vout as u32,
+                    position as u32,
                     txout.value.to_sat(),
                     txout.script_pubkey.clone(),
-                )
-                .0
+                );
+
+                depth.insert(
+                    "output",
+                    output_offset + position,
+                    retained,
+                );
+
+                output
             })
             .collect::<Vec<BitcoinOutput>>();
 
-        let payload = BitcoinPayload::new(inputs, outputs);
-        let retained = payload.replay_mass(manifold);
+        let retained_mass =
+            Direction::realize_depth(manifold, &depth).mass;
 
-        Ok((payload, retained))
+        let payload = BitcoinPayload::new(
+            inputs,
+            outputs,
+        );
+
+        Ok((payload, retained_mass))
     }
 }
