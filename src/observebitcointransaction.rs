@@ -1,12 +1,9 @@
 
-use bitcoin::{Amount, Txid};
+use bitcoin::{Amount, OutPoint, TxIn, Txid};
 use quantom_value::QuantPerm;
 use qp_hd::protocolvalue::Qtm;
 
-use crate::bitcoinpayload::{
-    BitcoinPayload,
-    PayloadComponent,
-};
+use crate::bitcoinpayload::BitcoinPayload;
 use crate::observestream::{
     BitcoinObservation,
     BitcoinObservationSource,
@@ -15,12 +12,6 @@ use crate::observestream::{
 type ObservationResult<T> =
     Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
-/// Canonical observed Bitcoin transaction.
-///
-/// Transactions can originate from network observation or Bitcoin Core
-/// getblocktemplate(). Template metadata is retained when available.
-///
-/// NOTE: getblocktemplate() does not provide referenced UTXOs.
 #[derive(Clone, Debug)]
 pub struct ObservedBitcoinTransaction {
     pub observation: Option<BitcoinObservation>,
@@ -28,15 +19,9 @@ pub struct ObservedBitcoinTransaction {
     pub txid: Txid,
     pub transaction: bitcoin::Transaction,
     pub coinbase: bool,
-    /// Fee quantity derived from the retained payload.
     pub fee: Option<u64>,
-    /// Weight from the block template; None if unavailable.
     pub weight: Option<u64>,
-    /// Zero-based indexes into the template transaction list.
-    /// Bitcoin Core supplies these indexes as one-based values.
     pub depends: Option<Vec<usize>>,
-    /// Original zero-based position in the template.
-    /// None if unavailable.
     pub template_index: Option<usize>,
 }
 
@@ -82,20 +67,44 @@ impl ObservedBitcoinTransaction {
         previous_transaction: &bitcoin::Transaction,
         source: BitcoinObservationSource,
     ) -> ObservationResult<Self> {
-        let coordinate: [u8; 32] =
-            Qtm::derive_coordinate(manifold);
+        // Previous transaction output vout=1 is the spending source.
+        if previous_transaction.output.get(1).is_none() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Previous transaction output vout=1 not found",
+            )
+            .into());
+        }
 
-        let fee_mass = payload.fee_mass(manifold);
-
-        let fee = u64::try_from(fee_mass).map_err(|error| {
+        // New transaction input vin=1 spends previous transaction vout=1.
+        let input = payload.inputs.get_mut(1).ok_or_else(|| {
             std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!(
-                    "Retained fee quantity exceeds supported range: {error}"
-                ),
+                std::io::ErrorKind::InvalidData,
+                "Bitcoin payload input index 1 not found",
             )
         })?;
 
+        input.previous_output = OutPoint {
+            txid: previous_transaction.compute_txid(),
+            vout: 1,
+        };
+
+        // Derive the canonical coordinate from the manifold.
+        let coordinate: [u8; 32] =
+            Qtm::derive_coordinate(manifold);
+
+        // Calculate retained fee after the input outpoint assignment.
+        let fee = u64::try_from(payload.fee_mass(manifold))
+            .map_err(|error| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!(
+                        "Retained fee quantity exceeds supported range: {error}"
+                    ),
+                )
+            })?;
+
+        // New transaction output vout=0 is independently assigned.
         let output = payload
             .outputs
             .iter_mut()
@@ -109,43 +118,43 @@ impl ObservedBitcoinTransaction {
 
         let original_value = output.value;
 
-        output.value = original_value.checked_sub(fee).ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!(
-                    "Insufficient settlement output value: value={original_value} sat, fee={fee} sat",
-                ),
-            )
-        })?;
+        output.value = original_value
+            .checked_sub(fee)
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!(
+                        "Insufficient settlement output value: value={original_value} sat, fee={fee} sat",
+                    ),
+                )
+            })?;
 
-        eprintln!(
-            "[bitcoin-retain] fee_sat={} settlement_value_sat={}->{}",
-            fee,
-            original_value,
-            output.value,
-        );
-
-        let (
-            assigned_output,
-            _assigned_input,
-            assigned_input_retained,
-        ) = output.assign(
+        let assigned_output = output.assign(
             manifold,
             coordinate,
-            previous_transaction,
         )?;
 
         eprintln!(
-            "[bitcoin-retain] assigned_output retained_mass={}",
+            "[bitcoin-retain] fee_sat={} settlement_value_sat={}->{} assigned_output_retained_mass={}",
+            fee,
+            original_value,
+            output.value,
             assigned_output.mass,
         );
 
-        eprintln!(
-            "[bitcoin-retain] assigned_input retained_mass={}",
-            assigned_input_retained.mass,
-        );
+        // Materialize inputs in their existing index order.
+        let inputs: Vec<TxIn> = payload
+            .inputs
+            .into_iter()
+            .map(|input| TxIn {
+                previous_output: input.previous_output,
+                script_sig: input.script_sig,
+                sequence: input.sequence,
+                witness: input.witness,
+            })
+            .collect();
 
-
+        // Materialize outputs in their existing vout order.
         let outputs = payload
             .outputs
             .into_iter()
