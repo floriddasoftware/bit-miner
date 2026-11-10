@@ -33,7 +33,7 @@ impl BitcoinUTXOCollector {
                     txin.witness.clone(),
                     txin.sequence,
                 )
-                .0
+                .1
             })
             .collect::<Vec<BitcoinInput>>();
 
@@ -48,7 +48,7 @@ impl BitcoinUTXOCollector {
                     txout.value.to_sat(),
                     txout.script_pubkey.clone(),
                 )
-                .1
+                .0
             })
             .collect::<Vec<BitcoinOutput>>();
 
