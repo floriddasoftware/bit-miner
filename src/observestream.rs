@@ -4,7 +4,7 @@ use std::{
     error::Error,
     str::FromStr,
 };
-
+use qp_hd::commands::persist_wirepackets;
 use bitcoin::{consensus::Decodable, Txid};
 use futures_util::{SinkExt, StreamExt};
 use qp_hd::pathsregistry::CoinType;
@@ -341,12 +341,12 @@ async fn fetch_decode<T: Decodable>(
     Ok(bitcoin::consensus::deserialize::<T>(&raw)?)
 }
 
-/// Converts the constructed settlement into a PSBT and publishes
-/// QTM wire packets derived from that same settlement.
+
+/// Converts the constructed settlement into a PSBT, persists its
+/// QTM wire packets, and publishes those packets.
 ///
-/// This function deliberately does not broadcast the unsigned
-/// Bitcoin transaction. Bitcoin broadcasting happens only after
-/// the PSBT has been signed and finalized.
+/// Bitcoin broadcasting happens only after the PSBT has been
+/// signed and finalized.
 #[inline(always)]
 pub fn refresh<R: PrevoutResolver>(
     pipeline: &mut BitcoinObservationPipeline,
@@ -354,6 +354,8 @@ pub fn refresh<R: PrevoutResolver>(
     observed: ObservedBitcoinTransaction,
     resolver: &R,
 ) -> PipelineOutcome {
+    let activation = observed.source.activation;
+
     let outcome = pipeline.process(substrate, observed)?;
 
     let Some((
@@ -365,12 +367,57 @@ pub fn refresh<R: PrevoutResolver>(
         return Ok(None);
     };
 
-    // Preserve QTM announcements from the exact constructed
-    // settlement before moving it into PSBT preparation.
+    // Derive packets from the exact finalized transaction.
     let wire_packets = finalized.wire_packets(commitment);
 
-    // Consume the settlement construction directly.
-    // No transaction reconstruction occurs here.
+    // Persist packets sequentially using the QTM TCP frame format:
+    // [4-byte big-endian payload length][serialized packet].
+    let mut packet_bytes = Vec::new();
+
+    for packet in &wire_packets {
+        let payload = packet.serialize();
+
+        if payload.is_empty() {
+            return Err(SettlementError::Backend(
+                "QTM wire packet serialization failed".into(),
+            ));
+        }
+
+        let frame_len = u32::try_from(payload.len())
+            .map_err(|error| {
+                SettlementError::Backend(format!(
+                    "QTM wire packet frame length failed: {error}"
+                ))
+            })?;
+
+        packet_bytes.extend_from_slice(
+            &frame_len.to_be_bytes(),
+        );
+        packet_bytes.extend_from_slice(&payload);
+    }
+
+    // Persist the complete packet sequence for this activation.
+    persist_wirepackets(
+        substrate,
+        activation,
+        &packet_bytes,
+    )
+    .map_err(|error| {
+        SettlementError::Backend(format!(
+            "QTM wire packet persistence failed: {error}"
+        ))
+    })?;
+
+    println!(
+        "qtm_wirepackets=persisted substrate={} activation={} commitment={} packets={} bytes={}",
+        substrate,
+        activation,
+        hex::encode(commitment),
+        wire_packets.len(),
+        packet_bytes.len(),
+    );
+
+    // Prepare the PSBT from the same finalized transaction.
     let psbt = BitcoinPsbt::from_settlement(
         finalized,
         resolver,
@@ -386,8 +433,7 @@ pub fn refresh<R: PrevoutResolver>(
         psbt.unsigned_txid(),
     );
 
-    // These are QTM output announcements, not Bitcoin
-    // transaction broadcasts.
+    // Publish the same packets that were persisted.
     for wire_packet in wire_packets {
         pipeline
             .miner()
