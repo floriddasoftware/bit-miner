@@ -1,9 +1,11 @@
-
-use bitcoin::{Amount, ScriptBuf, TxIn, Txid, Witness};
+use bitcoin::{Amount, TxIn, Txid};
 use quantom_value::QuantPerm;
 use qp_hd::protocolvalue::Qtm;
 
-use crate::bitcoinpayload::BitcoinPayload;
+use crate::bitcoinpayload::{
+    BitcoinPayload,
+    PayloadComponent,
+};
 use crate::observestream::{
     BitcoinObservation,
     BitcoinObservationSource,
@@ -67,11 +69,9 @@ impl ObservedBitcoinTransaction {
         _previous_transaction: &bitcoin::Transaction,
         source: BitcoinObservationSource,
     ) -> ObservationResult<Self> {
-        // Derive the canonical coordinate from the manifold.
         let coordinate: [u8; 32] =
             Qtm::derive_coordinate(manifold);
 
-        // Calculate retained fee for the independent settlement assignment.
         let fee = u64::try_from(payload.fee_mass(manifold))
             .map_err(|error| {
                 std::io::Error::new(
@@ -82,8 +82,8 @@ impl ObservedBitcoinTransaction {
                 )
             })?;
 
-        // Independently assign the new settlement output vout=0.
-        let output = payload
+        // The settlement fee is deducted once from its designated output.
+        let settlement_output = payload
             .outputs
             .iter_mut()
             .find(|output| output.vout == 0)
@@ -94,9 +94,9 @@ impl ObservedBitcoinTransaction {
                 )
             })?;
 
-        let original_value = output.value;
+        let original_value = settlement_output.value;
 
-        output.value = original_value
+        settlement_output.value = original_value
             .checked_sub(fee)
             .ok_or_else(|| {
                 std::io::Error::new(
@@ -107,45 +107,90 @@ impl ObservedBitcoinTransaction {
                 )
             })?;
 
-        let assigned_output = output.assign(
-            manifold,
-            coordinate,
-        )?;
+        // Every payload output receives its own assignment.
+        // The vout and value remain output-specific.
+        payload.outputs.sort_by_key(|output| output.vout);
 
-        eprintln!(
-            "[bitcoin-retain] fee_sat={} settlement_value_sat={}->{} assigned_output_retained_mass={}",
-            fee,
-            original_value,
-            output.value,
-            assigned_output.mass,
+        let mut assigned_outputs = Vec::with_capacity(
+            payload.outputs.len(),
         );
 
-        // Materialize inputs in their existing index order.
-        // Input 0 receives fresh script buffers; its structural realization
-        // was already established by BitcoinInput::new().
+        for (position, output) in
+            payload.outputs.iter_mut().enumerate()
+        {
+            if output.vout as usize != position {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "Incomplete output template: expected vout={}, found vout={}",
+                        position,
+                        output.vout,
+                    ),
+                )
+                .into());
+            }
+
+            let original_script = output.script_pubkey.clone();
+
+            let retained = output.assign(
+                manifold,
+                coordinate,
+            )?;
+
+            eprintln!(
+                "[bitcoin-retain] vout={} value_sat={} assigned_retained_mass={} previous_script_bytes={} assigned_script_bytes={}",
+                output.vout,
+                output.value,
+                retained.mass,
+                original_script.len(),
+                output.script_pubkey.len(),
+            );
+
+            assigned_outputs.push(retained);
+        }
+
+        eprintln!(
+            "[bitcoin-retain] fee_sat={} settlement_value_sat={}->{} assigned_outputs={}",
+            fee,
+            original_value,
+            payload.outputs[0].value,
+            assigned_outputs.len(),
+        );
+
+        // Realize every input at its own vin position.
+        // Preserve the input's existing outpoint, scriptSig,
+        // sequence, and witness.
         let inputs: Vec<TxIn> = payload
             .inputs
-            .into_iter()
+            .iter()
             .enumerate()
             .map(|(index, input)| {
+                let retained = input.deep(
+                    manifold,
+                    "qp/payload",
+                    index,
+                );
+
+                eprintln!(
+                    "[bitcoin-retain] vin={} outpoint={}:{} retained_mass={} script_sig_bytes={} witness_items={}",
+                    index,
+                    input.previous_output.txid,
+                    input.previous_output.vout,
+                    retained.mass,
+                    input.script_sig.len(),
+                    input.witness.len(),
+                );
+
                 TxIn {
                     previous_output: input.previous_output,
-                    script_sig: if index == 0 {
-                        ScriptBuf::new()
-                    } else {
-                        input.script_sig
-                    },
+                    script_sig: input.script_sig.clone(),
                     sequence: input.sequence,
-                    witness: if index == 0 {
-                        Witness::new()
-                    } else {
-                        input.witness
-                    },
+                    witness: input.witness.clone(),
                 }
             })
             .collect();
 
-        // Materialize outputs in their existing vout order.
+        // Materialize every assigned output in vout order.
         let outputs = payload
             .outputs
             .into_iter()
