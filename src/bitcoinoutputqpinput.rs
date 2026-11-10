@@ -4,8 +4,12 @@ use std::error::Error;
 use bitcoin::{
     hashes::Hash,
     secp256k1::PublicKey as SecpPublicKey,
+    OutPoint,
     PublicKey,
     ScriptBuf,
+    Sequence,
+    Txid,
+    Witness,
     WPubkeyHash,
 };
 use quantom_value::{QuantPerm, Retain};
@@ -14,9 +18,11 @@ use qtm_graph::graph::frame::{Depth, Direction};
 use crate::{
     bit_block::p2wpkh_script,
     bitcoinpayload::PayloadComponent,
+    qpoutputsbitcoininput::BitcoinInput,
 };
 
-type BitcoinOutputResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
+type BitcoinOutputResult<T> =
+    Result<T, Box<dyn Error + Send + Sync>>;
 
 #[repr(C)]
 #[derive(Clone, Debug)]
@@ -61,7 +67,8 @@ impl BitcoinOutput {
         &mut self,
         manifold: &QuantPerm,
         private_key: [u8; 32],
-    ) -> BitcoinOutputResult<Retain> {
+        previous_txid: Txid,
+    ) -> BitcoinOutputResult<(Retain, BitcoinInput)> {
         self.script_pubkey = p2wpkh_script(private_key)?;
 
         println!(
@@ -70,11 +77,26 @@ impl BitcoinOutput {
             hex::encode(self.script_pubkey.as_bytes()),
         );
 
-        Ok(self.deep(
+        let retained = self.deep(
             manifold,
             "qp/payload",
             self.vout as usize,
-        ))
+        );
+
+        let previous_output = OutPoint::new(
+            previous_txid,
+            self.vout,
+        );
+
+        let (_, input) = BitcoinInput::new(
+            manifold,
+            previous_output,
+            ScriptBuf::new(),
+            Witness::new(),
+            Sequence::MAX,
+        );
+
+        Ok((retained, input))
     }
 
     #[inline(always)]
@@ -83,9 +105,12 @@ impl BitcoinOutput {
         manifold: &QuantPerm,
         public_key: PublicKey,
     ) -> Retain {
-        let hash160 = WPubkeyHash::hash(&public_key.to_bytes());
+        let hash160 = WPubkeyHash::hash(
+            &public_key.to_bytes(),
+        );
 
-        self.script_pubkey = ScriptBuf::new_p2wpkh(&hash160);
+        self.script_pubkey =
+            ScriptBuf::new_p2wpkh(&hash160);
 
         println!(
             "trace=assigned_public_key vout={} script={}",
@@ -106,7 +131,8 @@ impl BitcoinOutput {
         manifold: &QuantPerm,
         public_key: &[u8],
     ) -> BitcoinOutputResult<Retain> {
-        let secp_public_key = SecpPublicKey::from_slice(public_key)?;
+        let secp_public_key =
+            SecpPublicKey::from_slice(public_key)?;
 
         Ok(self.assign_public_key(
             manifold,
@@ -156,11 +182,16 @@ impl PayloadComponent for BitcoinOutput {
     }
 
     #[inline(always)]
-    fn retained(&self, manifold: &QuantPerm) -> Retain {
+    fn retained(
+        &self,
+        manifold: &QuantPerm,
+    ) -> Retain {
         manifold.retain(
             (self.vout as u128)
                 .saturating_add(self.value as u128)
-                .saturating_add(bytes_mass(self.script_pubkey.as_bytes())),
+                .saturating_add(
+                    bytes_mass(self.script_pubkey.as_bytes()),
+                ),
             manifold.dimension(),
         )
     }
