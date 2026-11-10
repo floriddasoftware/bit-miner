@@ -145,16 +145,6 @@ impl ObservedBitcoinTransaction {
             assigned_input_retained.mass,
         );
 
-        let inputs = payload
-            .inputs
-            .into_iter()
-            .map(|input| bitcoin::TxIn {
-                previous_output: input.previous_output,
-                script_sig: input.script_sig,
-                sequence: input.sequence,
-                witness: input.witness,
-            })
-            .collect();
 
         let outputs = payload
             .outputs
