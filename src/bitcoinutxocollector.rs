@@ -48,7 +48,7 @@ impl BitcoinUTXOCollector {
                     txout.value.to_sat(),
                     txout.script_pubkey.clone(),
                 )
-                .0
+                .1
             })
             .collect::<Vec<BitcoinOutput>>();
 
