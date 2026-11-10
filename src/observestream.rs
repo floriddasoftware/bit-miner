@@ -19,9 +19,12 @@ use tokio_tungstenite::{
 };
 
 use crate::{
-    broadcast::FinalizedSettlement,
+    bitcoinpsbt::{
+        BitcoinPsbt,
+        PrevoutResolver,
+    },
     observebitcointransaction::ObservedBitcoinTransaction,
-    settlement::{SettlementEngine, SettlementError},
+    settlement::SettlementError,
     BitcoinObservationPipeline,
 };
 
@@ -33,7 +36,7 @@ pub type ObservationResult<T> =
 pub type PipelineOutcome =
     Result<
         Option<(
-            FinalizedSettlement,
+            BitcoinPsbt,
             u128,
             [u8; 32],
             Depth,
@@ -155,11 +158,13 @@ impl MempoolSpaceStream {
         }
     }
 
-    /// Passes the next transaction through finalization and broadcasting.
-    pub async fn stream(
+    /// Passes the next transaction through settlement construction
+    /// and PSBT preparation.
+    pub async fn stream<R: PrevoutResolver>(
         &mut self,
         substrate: &str,
         pipeline: &mut BitcoinObservationPipeline,
+        resolver: &R,
     ) -> ObservationResult<PipelineOutcome> {
         let observation = self.next_observation().await?;
 
@@ -171,7 +176,12 @@ impl MempoolSpaceStream {
             self.source,
         );
 
-        Ok(refresh(pipeline, substrate, observed))
+        Ok(refresh(
+            pipeline,
+            substrate,
+            observed,
+            resolver,
+        ))
     }
 
     async fn fill(&mut self) -> ObservationResult<()> {
@@ -331,14 +341,18 @@ async fn fetch_decode<T: Decodable>(
     Ok(bitcoin::consensus::deserialize::<T>(&raw)?)
 }
 
-
-
-/// Finalizes the observation and publishes its settlement.
+/// Converts the constructed settlement into a PSBT and publishes
+/// QTM wire packets derived from that same settlement.
+///
+/// This function deliberately does not broadcast the unsigned
+/// Bitcoin transaction. Bitcoin broadcasting happens only after
+/// the PSBT has been signed and finalized.
 #[inline(always)]
-pub fn refresh(
+pub fn refresh<R: PrevoutResolver>(
     pipeline: &mut BitcoinObservationPipeline,
     substrate: &str,
     observed: ObservedBitcoinTransaction,
+    resolver: &R,
 ) -> PipelineOutcome {
     let outcome = pipeline.process(substrate, observed)?;
 
@@ -351,24 +365,29 @@ pub fn refresh(
         return Ok(None);
     };
 
-    // Submit the transaction already finalized by process().
-    let electrum_txid = pipeline
-        .electrum
-        .submit(finalized.transaction.clone())
-        .map_err(|error| {
-            SettlementError::Backend(format!(
-                "Electrum transaction submission failed: {error}"
-            ))
-        })?;
-
-    println!(
-        "electrum_submission=queued txid={}",
-        electrum_txid,
-    );
-
-    // Publish packets from the same finalized transaction.
+    // Preserve QTM announcements from the exact constructed
+    // settlement before moving it into PSBT preparation.
     let wire_packets = finalized.wire_packets(commitment);
 
+    // Consume the settlement construction directly.
+    // No transaction reconstruction occurs here.
+    let psbt = BitcoinPsbt::from_settlement(
+        finalized,
+        resolver,
+    )
+    .map_err(|error| {
+        SettlementError::Backend(format!(
+            "Bitcoin PSBT preparation failed: {error}"
+        ))
+    })?;
+
+    println!(
+        "bitcoin_psbt=prepared unsigned_txid={}",
+        psbt.unsigned_txid(),
+    );
+
+    // These are QTM output announcements, not Bitcoin
+    // transaction broadcasts.
     for wire_packet in wire_packets {
         pipeline
             .miner()
@@ -377,7 +396,7 @@ pub fn refresh(
     }
 
     Ok(Some((
-        finalized,
+        psbt,
         retained_mass,
         commitment,
         depth,
