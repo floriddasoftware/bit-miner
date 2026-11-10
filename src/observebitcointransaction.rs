@@ -1,4 +1,11 @@
-use bitcoin::{Amount, TxIn, Txid};
+
+use bitcoin::{
+    Amount,
+    ScriptBuf,
+    TxIn,
+    Txid,
+    Witness,
+};
 use quantom_value::QuantPerm;
 use qp_hd::protocolvalue::Qtm;
 
@@ -10,7 +17,6 @@ use crate::observestream::{
     BitcoinObservation,
     BitcoinObservationSource,
 };
-use crate::qpoutputsbitcoininput::BitcoinInput;
 
 type ObservationResult<T> =
     Result<T, Box<dyn std::error::Error + Send + Sync>>;
@@ -67,13 +73,10 @@ impl ObservedBitcoinTransaction {
     pub fn new_transact(
         manifold: &QuantPerm,
         mut payload: BitcoinPayload,
-        previous_transaction: &bitcoin::Transaction,
         source: BitcoinObservationSource,
     ) -> ObservationResult<Self> {
         let coordinate: [u8; 32] =
             Qtm::derive_coordinate(manifold);
-
-        let previous_txid = previous_transaction.compute_txid();
 
         let fee = u64::try_from(payload.fee_mass(manifold))
             .map_err(|error| {
@@ -112,14 +115,11 @@ impl ObservedBitcoinTransaction {
 
         let settlement_value = settlement_output.value;
 
-        // Every payload output receives its own assignment.
-        // Each assignment also realizes its corresponding previous input.
+        // Assign every payload output independently.
+        // Assignment establishes the new output script and retained value.
         payload.outputs.sort_by_key(|output| output.vout);
 
         let mut assigned_outputs =
-            Vec::with_capacity(payload.outputs.len());
-
-        let mut assigned_inputs =
             Vec::with_capacity(payload.outputs.len());
 
         for (position, output) in
@@ -139,10 +139,9 @@ impl ObservedBitcoinTransaction {
 
             let original_script = output.script_pubkey.clone();
 
-            let (retained, input) = output.assign(
+            let retained = output.assign(
                 manifold,
                 coordinate,
-                previous_txid,
             )?;
 
             eprintln!(
@@ -155,34 +154,33 @@ impl ObservedBitcoinTransaction {
             );
 
             assigned_outputs.push(retained);
-            assigned_inputs.push(input);
         }
 
         eprintln!(
-            "[bitcoin-retain] fee_sat={} settlement_value_sat={}->{} assigned_outputs={} assigned_inputs={}",
+            "[bitcoin-retain] fee_sat={} settlement_value_sat={}->{} assigned_outputs={}",
             fee,
             original_value,
             settlement_value,
             assigned_outputs.len(),
-            assigned_inputs.len(),
         );
 
-        // Materialize the inputs created by the output assignments.
-        // Their empty script buffers and sequence were initialized
-        // by BitcoinInput::new() inside BitcoinOutput::assign().
-        let inputs: Vec<TxIn> = assigned_inputs
+        // Materialize the supplied input outpoints.
+        // Signing data is intentionally empty at transaction creation.
+        // Preserve each input's outpoint and sequence.
+        let inputs: Vec<TxIn> = payload
+            .inputs
             .into_iter()
-            .map(|input: BitcoinInput| {
+            .map(|input| {
                 TxIn {
                     previous_output: input.previous_output,
-                    script_sig: input.script_sig,
+                    script_sig: ScriptBuf::new(),
                     sequence: input.sequence,
-                    witness: input.witness,
+                    witness: Witness::new(),
                 }
             })
             .collect();
 
-        // Materialize every assigned output in vout order.
+        // Materialize assigned outputs in vout order.
         let outputs = payload
             .outputs
             .into_iter()
@@ -213,13 +211,11 @@ impl ObservedBitcoinTransaction {
     pub fn new_transaction(
         manifold: &QuantPerm,
         payload: BitcoinPayload,
-        previous_transaction: &bitcoin::Transaction,
         source: BitcoinObservationSource,
     ) -> ObservationResult<Self> {
         Self::new_transact(
             manifold,
             payload,
-            previous_transaction,
             source,
         )
     }
