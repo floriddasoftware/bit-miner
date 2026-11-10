@@ -28,6 +28,7 @@ pub struct BitcoinObservationPipeline {
     pub miner: Miner,
     pub electrum: ElectrumBroadcastService,
     chain: RenderState,
+    network: String,
 }
 
 impl BitcoinObservationPipeline {
@@ -35,7 +36,14 @@ impl BitcoinObservationPipeline {
     pub fn new(
         activation: u64,
         substrate: &str,
+        network: &str,
     ) -> Result<Self, SettlementError> {
+        if network.trim().is_empty() {
+            return Err(SettlementError::Backend(
+                "Bitcoin observation pipeline requires a network ID".into(),
+            ));
+        }
+
         let clip = ActiveClip {
             substrate: substrate.to_owned(),
             activation,
@@ -46,7 +54,13 @@ impl BitcoinObservationPipeline {
             miner: Miner::new(clip),
             electrum: ElectrumBroadcastService::init(1024),
             chain: RenderState::window(substrate.to_owned()),
+            network: network.to_owned(),
         })
+    }
+
+    #[inline(always)]
+    pub fn network(&self) -> &str {
+        &self.network
     }
 
     #[inline(always)]
@@ -93,19 +107,25 @@ impl BitcoinObservationPipeline {
             .map(|clip| clip.activation)
             .ok_or_else(|| {
                 SettlementError::Backend(format!(
-                    "no active miner clip for substrate {substrate}"
+                    "no active miner clip for substrate={}",
+                    substrate,
                 ))
             })?;
 
-        let budget = load_budget(substrate, activation)
-            .map_err(|error| {
-                SettlementError::Backend(format!(
-                    "failed to load event budget for substrate={} activation={}: {}",
-                    substrate,
-                    activation,
-                    error,
-                ))
-            })?;
+        let budget = load_budget(
+            substrate,
+            activation,
+            &self.network,
+        )
+        .map_err(|error| {
+            SettlementError::Backend(format!(
+                "failed to load event budget for substrate={} activation={} network={}: {}",
+                substrate,
+                activation,
+                self.network,
+                error,
+            ))
+        })?;
 
         let submissions = self
             .miner
@@ -116,9 +136,10 @@ impl BitcoinObservationPipeline {
 
         if submissions >= budget.max_events {
             return Err(SettlementError::Backend(format!(
-                "submission budget exhausted: substrate={} activation={} submissions={} max_events={}",
+                "submission budget exhausted: substrate={} activation={} network={} submissions={} max_events={}",
                 substrate,
                 activation,
+                self.network,
                 submissions,
                 budget.max_events,
             )));
@@ -139,7 +160,11 @@ impl BitcoinObservationPipeline {
             .submit(substrate, activation)
             .map_err(|error| {
                 SettlementError::Backend(format!(
-                    "miner submission failed: {error}"
+                    "miner submission failed: substrate={} activation={} network={}: {}",
+                    substrate,
+                    activation,
+                    self.network,
+                    error,
                 ))
             })?;
 
