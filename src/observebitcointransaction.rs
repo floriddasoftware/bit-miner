@@ -10,6 +10,7 @@ use crate::observestream::{
     BitcoinObservation,
     BitcoinObservationSource,
 };
+use crate::qpoutputsbitcoininput::BitcoinInput;
 
 type ObservationResult<T> =
     Result<T, Box<dyn std::error::Error + Send + Sync>>;
@@ -66,11 +67,13 @@ impl ObservedBitcoinTransaction {
     pub fn new_transact(
         manifold: &QuantPerm,
         mut payload: BitcoinPayload,
-        _previous_transaction: &bitcoin::Transaction,
+        previous_transaction: &bitcoin::Transaction,
         source: BitcoinObservationSource,
     ) -> ObservationResult<Self> {
         let coordinate: [u8; 32] =
             Qtm::derive_coordinate(manifold);
+
+        let previous_txid = previous_transaction.compute_txid();
 
         let fee = u64::try_from(payload.fee_mass(manifold))
             .map_err(|error| {
@@ -82,7 +85,7 @@ impl ObservedBitcoinTransaction {
                 )
             })?;
 
-        // The settlement fee is deducted once from its designated output.
+        // Deduct the settlement fee once from output vout=0.
         let settlement_output = payload
             .outputs
             .iter_mut()
@@ -107,13 +110,17 @@ impl ObservedBitcoinTransaction {
                 )
             })?;
 
+        let settlement_value = settlement_output.value;
+
         // Every payload output receives its own assignment.
-        // The vout and value remain output-specific.
+        // Each assignment also realizes its corresponding previous input.
         payload.outputs.sort_by_key(|output| output.vout);
 
-        let mut assigned_outputs = Vec::with_capacity(
-            payload.outputs.len(),
-        );
+        let mut assigned_outputs =
+            Vec::with_capacity(payload.outputs.len());
+
+        let mut assigned_inputs =
+            Vec::with_capacity(payload.outputs.len());
 
         for (position, output) in
             payload.outputs.iter_mut().enumerate()
@@ -132,9 +139,10 @@ impl ObservedBitcoinTransaction {
 
             let original_script = output.script_pubkey.clone();
 
-            let retained = output.assign(
+            let (retained, input) = output.assign(
                 manifold,
                 coordinate,
+                previous_txid,
             )?;
 
             eprintln!(
@@ -147,45 +155,29 @@ impl ObservedBitcoinTransaction {
             );
 
             assigned_outputs.push(retained);
+            assigned_inputs.push(input);
         }
 
         eprintln!(
-            "[bitcoin-retain] fee_sat={} settlement_value_sat={}->{} assigned_outputs={}",
+            "[bitcoin-retain] fee_sat={} settlement_value_sat={}->{} assigned_outputs={} assigned_inputs={}",
             fee,
             original_value,
-            payload.outputs[0].value,
+            settlement_value,
             assigned_outputs.len(),
+            assigned_inputs.len(),
         );
 
-        // Realize every input at its own vin position.
-        // Preserve the input's existing outpoint, scriptSig,
-        // sequence, and witness.
-        let inputs: Vec<TxIn> = payload
-            .inputs
-            .iter()
-            .enumerate()
-            .map(|(index, input)| {
-                let retained = input.deep(
-                    manifold,
-                    "qp/payload",
-                    index,
-                );
-
-                eprintln!(
-                    "[bitcoin-retain] vin={} outpoint={}:{} retained_mass={} script_sig_bytes={} witness_items={}",
-                    index,
-                    input.previous_output.txid,
-                    input.previous_output.vout,
-                    retained.mass,
-                    input.script_sig.len(),
-                    input.witness.len(),
-                );
-
+        // Materialize the inputs created by the output assignments.
+        // Their empty script buffers and sequence were initialized
+        // by BitcoinInput::new() inside BitcoinOutput::assign().
+        let inputs: Vec<TxIn> = assigned_inputs
+            .into_iter()
+            .map(|input: BitcoinInput| {
                 TxIn {
                     previous_output: input.previous_output,
-                    script_sig: input.script_sig.clone(),
+                    script_sig: input.script_sig,
                     sequence: input.sequence,
-                    witness: input.witness.clone(),
+                    witness: input.witness,
                 }
             })
             .collect();
