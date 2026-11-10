@@ -119,23 +119,24 @@ impl BitcoinInput {
             )
             .saturating_add(self.witness_mass())
     }
-    #[inline(always)]
     pub fn new(
-        manifold: &QuantPerm,
-        previous_output: OutPoint,
-        script_sig: ScriptBuf,
-        witness: Witness,
-        sequence: Sequence,
-    ) -> (Self, Retain) {
-        let input = Self {
-            previous_output,
-            script_sig,
-            witness,
-            sequence,
-        };
-        let retained = input.deep(manifold, "qp/payload", 0);
-        (input, retained)
-    }
+    manifold: &QuantPerm,
+    previous_output: OutPoint,
+    script_sig: ScriptBuf,
+    witness: Witness,
+    sequence: Sequence,
+) -> (Retain, Self) {
+    let input = Self {
+        previous_output,
+        script_sig,
+        witness,
+        sequence,
+    };
+
+    let retained = input.deep(manifold, "qp/payload", 0);
+
+    (retained, input)
+}
     #[inline]
     pub fn sign(
         &mut self,
