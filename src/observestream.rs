@@ -343,7 +343,7 @@ async fn fetch_decode<T: Decodable>(
 
 
 /// Converts the constructed settlement into a PSBT, persists its
-/// QTM wire packets, and publishes those packets.
+/// submission-scoped QTM wire packets, and publishes those packets.
 ///
 /// Bitcoin broadcasting happens only after the PSBT has been
 /// signed and finalized.
@@ -367,10 +367,26 @@ pub fn refresh<R: PrevoutResolver>(
         return Ok(None);
     };
 
+    // Miner::submit() has already incremented this counter
+    // inside BitcoinObservationPipeline::process().
+    let submission = pipeline
+        .miner
+        .submissions
+        .get(substrate)
+        .copied()
+        .ok_or_else(|| {
+            SettlementError::Backend(format!(
+                "submission sequence missing: substrate={} activation={}",
+                substrate,
+                activation,
+            ))
+        })?;
+
     // Derive packets from the exact finalized transaction.
     let wire_packets = finalized.wire_packets(commitment);
 
-    // Persist packets sequentially using the QTM TCP frame format:
+    // Persist the complete packet sequence using the QTM TCP
+    // frame format:
     // [4-byte big-endian payload length][serialized packet].
     let mut packet_bytes = Vec::new();
 
@@ -396,10 +412,11 @@ pub fn refresh<R: PrevoutResolver>(
         packet_bytes.extend_from_slice(&payload);
     }
 
-    // Persist the complete packet sequence for this activation.
+    // Each miner submission has its own WirePackets file.
     persist_wirepackets(
         substrate,
         activation,
+        submission,
         &packet_bytes,
     )
     .map_err(|error| {
@@ -409,9 +426,10 @@ pub fn refresh<R: PrevoutResolver>(
     })?;
 
     println!(
-        "qtm_wirepackets=persisted substrate={} activation={} commitment={} packets={} bytes={}",
+        "qtm_wirepackets=persisted substrate={} activation={} submission={} commitment={} packets={} bytes={}",
         substrate,
         activation,
+        submission,
         hex::encode(commitment),
         wire_packets.len(),
         packet_bytes.len(),
@@ -429,7 +447,8 @@ pub fn refresh<R: PrevoutResolver>(
     })?;
 
     println!(
-        "bitcoin_psbt=prepared unsigned_txid={}",
+        "bitcoin_psbt=prepared submission={} unsigned_txid={}",
+        submission,
         psbt.unsigned_txid(),
     );
 
