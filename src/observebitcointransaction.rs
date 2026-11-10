@@ -1,5 +1,5 @@
 
-use bitcoin::{Amount, OutPoint, TxIn, Txid};
+use bitcoin::{Amount, ScriptBuf, TxIn, Txid, Witness};
 use quantom_value::QuantPerm;
 use qp_hd::protocolvalue::Qtm;
 
@@ -64,36 +64,14 @@ impl ObservedBitcoinTransaction {
     pub fn new_transact(
         manifold: &QuantPerm,
         mut payload: BitcoinPayload,
-        previous_transaction: &bitcoin::Transaction,
+        _previous_transaction: &bitcoin::Transaction,
         source: BitcoinObservationSource,
     ) -> ObservationResult<Self> {
-        // Previous transaction output vout=1 is the spending source.
-        if previous_transaction.output.get(1).is_none() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "Previous transaction output vout=1 not found",
-            )
-            .into());
-        }
-
-        // New transaction input vin=1 spends previous transaction vout=1.
-        let input = payload.inputs.get_mut(1).ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "Bitcoin payload input index 1 not found",
-            )
-        })?;
-
-        input.previous_output = OutPoint {
-            txid: previous_transaction.compute_txid(),
-            vout: 1,
-        };
-
         // Derive the canonical coordinate from the manifold.
         let coordinate: [u8; 32] =
             Qtm::derive_coordinate(manifold);
 
-        // Calculate retained fee after the input outpoint assignment.
+        // Calculate retained fee for the independent settlement assignment.
         let fee = u64::try_from(payload.fee_mass(manifold))
             .map_err(|error| {
                 std::io::Error::new(
@@ -104,7 +82,7 @@ impl ObservedBitcoinTransaction {
                 )
             })?;
 
-        // New transaction output vout=0 is independently assigned.
+        // Independently assign the new settlement output vout=0.
         let output = payload
             .outputs
             .iter_mut()
@@ -143,14 +121,27 @@ impl ObservedBitcoinTransaction {
         );
 
         // Materialize inputs in their existing index order.
+        // Input 0 receives fresh script buffers; its structural realization
+        // was already established by BitcoinInput::new().
         let inputs: Vec<TxIn> = payload
             .inputs
             .into_iter()
-            .map(|input| TxIn {
-                previous_output: input.previous_output,
-                script_sig: input.script_sig,
-                sequence: input.sequence,
-                witness: input.witness,
+            .enumerate()
+            .map(|(index, input)| {
+                TxIn {
+                    previous_output: input.previous_output,
+                    script_sig: if index == 0 {
+                        ScriptBuf::new()
+                    } else {
+                        input.script_sig
+                    },
+                    sequence: input.sequence,
+                    witness: if index == 0 {
+                        Witness::new()
+                    } else {
+                        input.witness
+                    },
+                }
             })
             .collect();
 
