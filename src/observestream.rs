@@ -1,4 +1,4 @@
-
+use crate::qpoutputsbitcoininput::BitcoinInput;
 use std::{
     collections::{HashSet, VecDeque},
     error::Error,
@@ -15,6 +15,8 @@ use qp_hd::commands::{
     load_budget,
     load_wirepackets,
     persist_wirepackets,
+    qtm_open_manifold_until,
+    load_qtm_at_activation,
 };
 use qp_hd::pathsregistry::CoinType;
 use qtm_graph::graph::frame::Depth;
@@ -367,6 +369,7 @@ async fn fetch_decode<T: Decodable>(
 /// 7. Resolve every input using its parent's submission and commitment.
 /// 8. Prepare the PSBT.
 /// 9. Publish the reloaded packets.
+
 #[inline(always)]
 pub fn refresh<R: PrevoutResolver>(
     pipeline: &mut BitcoinObservationPipeline,
@@ -411,8 +414,6 @@ pub fn refresh<R: PrevoutResolver>(
         ))
     })?;
 
-    // Load every permitted persisted submission.
-    // Each submission owns its own commitment.
     let mut persisted = Vec::new();
     let mut sequence_ended = false;
 
@@ -520,7 +521,6 @@ pub fn refresh<R: PrevoutResolver>(
         )));
     }
 
-    // Construct exactly the next permitted submission.
     let outcome = pipeline.process(
         substrate,
         observed,
@@ -560,7 +560,6 @@ pub fn refresh<R: PrevoutResolver>(
 
     let settlement_txid = finalized.transaction.compute_txid();
 
-    // Frame and persist the exact finalized output sequence.
     let mut packet_bytes = Vec::new();
 
     for packet in &generated_packets {
@@ -608,7 +607,6 @@ pub fn refresh<R: PrevoutResolver>(
         ))
     })?;
 
-    // Reload the actual persisted submission.
     let persisted_bytes = load_wirepackets(
         substrate,
         activation,
@@ -648,8 +646,6 @@ pub fn refresh<R: PrevoutResolver>(
         persisted_bytes.len(),
     );
 
-    // Resolve each input through its actual parent submission.
-    // Do not use the current settlement's commitment for parent inputs.
     let mut resolved_prevouts = Vec::with_capacity(
         finalized.transaction.input.len(),
     );
@@ -729,7 +725,7 @@ pub fn refresh<R: PrevoutResolver>(
         resolved_prevouts.push(resolved);
     }
 
-    let psbt = BitcoinPsbt::from_settlement(
+    let mut psbt = BitcoinPsbt::from_settlement(
         finalized,
         resolved_prevouts,
     )
@@ -746,19 +742,88 @@ pub fn refresh<R: PrevoutResolver>(
         psbt.unsigned_txid(),
     );
 
+    // Load the activation's QTM coordinate once.
+    let qtm = load_qtm_at_activation(
+        substrate,
+        activation,
+    );
 
-let direction = pipeline
-    .render_state()
-    .direction
-    .as_ref()
-    .ok_or_else(|| {
-        SettlementError::Backend(
-            "QP render direction is unavailable for Bitcoin signing".into(),
-        )
-    })?;
+    let private_key = qtm.coordinate;
 
-let manifold = &direction.heritage().state;
-    // Publish only after successful PSBT preparation.
+    // Reconstruct the authentic manifold at this activation and
+    // initialize the render direction from its Heritage.
+    let heritage = qtm_open_manifold_until(
+        substrate,
+        activation,
+    );
+
+    pipeline
+        .render_state_mut()
+        .frames(
+            heritage,
+            Scale::Global,
+        );
+
+    // Sign every finalized transaction input against its own
+    // resolved witness_utxo before publishing any packet.
+    {
+        let direction = pipeline
+            .render_state()
+            .direction
+            .as_ref()
+            .ok_or_else(|| {
+                SettlementError::Backend(
+                    "QP render direction is unavailable for Bitcoin signing"
+                        .into(),
+                )
+            })?;
+
+        let manifold = &direction.heritage().state;
+
+        let transaction = &psbt.psbt.unsigned_tx;
+
+        if transaction.input.len() != psbt.psbt.inputs.len() {
+            return Err(SettlementError::Backend(format!(
+                "PSBT input count mismatch: transaction={} psbt={}",
+                transaction.input.len(),
+                psbt.psbt.inputs.len(),
+            )));
+        }
+
+        for (input_index, transaction_input) in
+            transaction.input.iter().enumerate()
+        {
+            let mut bitcoin_input = BitcoinInput {
+                previous_output: transaction_input.previous_output,
+                script_sig: transaction_input.script_sig.clone(),
+                witness: transaction_input.witness.clone(),
+                sequence: transaction_input.sequence,
+            };
+
+            psbt.sign_input(
+                &mut bitcoin_input,
+                manifold,
+                private_key,
+                input_index,
+            )
+            .map_err(|error| {
+                SettlementError::Backend(format!(
+                    "Bitcoin input signing failed: input={} outpoint={}: {}",
+                    input_index,
+                    transaction_input.previous_output,
+                    error,
+                ))
+            })?;
+        }
+    }
+
+    println!(
+        "bitcoin_psbt=signed submission={} inputs={}",
+        submission,
+        psbt.psbt.inputs.len(),
+    );
+
+    // Publish only after every PSBT input has signed successfully.
     for packet in wire_packets {
         pipeline
             .miner()
@@ -773,6 +838,7 @@ let manifold = &direction.heritage().state;
         depth,
     )))
 }
+
 
 
 /// Decode the persisted QTMGSP02 length-prefixed packet sequence.
