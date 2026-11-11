@@ -342,8 +342,12 @@ async fn fetch_decode<T: Decodable>(
 }
 
 
+
 /// Converts the constructed settlement into a PSBT, persists its
 /// submission-scoped QTM wire packets, and publishes those packets.
+///
+/// The finalized settlement transaction is the source of truth for
+/// PSBT inputs. Its receipt is preserved by BitcoinPsbt.
 ///
 /// Bitcoin broadcasting happens only after the PSBT has been
 /// signed and finalized.
@@ -355,6 +359,7 @@ pub fn refresh<R: PrevoutResolver>(
     resolver: &R,
 ) -> PipelineOutcome {
     let activation = observed.source.activation;
+    let source = observed.source;
 
     let outcome = pipeline.process(substrate, observed)?;
 
@@ -385,12 +390,65 @@ pub fn refresh<R: PrevoutResolver>(
     // Derive packets from the exact finalized transaction.
     let wire_packets = finalized.wire_packets(commitment);
 
+    if wire_packets.is_empty() {
+        return Err(SettlementError::Backend(
+            "finalized settlement produced no wire packets".into(),
+        ));
+    }
+
+    // The finalized transaction, not the original mempool
+    // observation, owns the inputs required by the PSBT.
+    let settlement_observed =
+        ObservedBitcoinTransaction::from_transaction(
+            finalized.transaction.clone(),
+            source,
+        );
+
+    // Every packet identifies the same settlement transaction.
+    // Resolve its actual inputs once, preserving transaction order.
+    let resolved_prevouts = settlement_observed
+        .resolve_wire_packet_inputs(
+            &wire_packets[0],
+            resolver,
+        )
+        .map_err(|error| {
+            SettlementError::Backend(format!(
+                "settlement input resolution failed: {error}"
+            ))
+        })?;
+
+    // Prepare the PSBT from the exact finalized transaction.
+    // The receipt is transferred unchanged from FinalizedSettlement.
+    let psbt = BitcoinPsbt::from_settlement(
+        finalized,
+        resolved_prevouts,
+    )
+    .map_err(|error| {
+        SettlementError::Backend(format!(
+            "Bitcoin PSBT preparation failed: {error}"
+        ))
+    })?;
+
+    println!(
+        "bitcoin_psbt=prepared submission={} unsigned_txid={}",
+        submission,
+        psbt.unsigned_txid(),
+    );
+
     // Persist the complete packet sequence using the QTM TCP
     // frame format:
     // [4-byte big-endian payload length][serialized packet].
     let mut packet_bytes = Vec::new();
 
     for packet in &wire_packets {
+        if packet.txid() != settlement_observed.txid {
+            return Err(SettlementError::Backend(format!(
+                "wire packet transaction mismatch: packet_txid={} settlement_txid={}",
+                packet.txid(),
+                settlement_observed.txid,
+            )));
+        }
+
         let payload = packet.serialize();
 
         if payload.is_empty() {
@@ -433,23 +491,6 @@ pub fn refresh<R: PrevoutResolver>(
         hex::encode(commitment),
         wire_packets.len(),
         packet_bytes.len(),
-    );
-
-    // Prepare the PSBT from the same finalized transaction.
-    let psbt = BitcoinPsbt::from_settlement(
-        finalized,
-        resolver,
-    )
-    .map_err(|error| {
-        SettlementError::Backend(format!(
-            "Bitcoin PSBT preparation failed: {error}"
-        ))
-    })?;
-
-    println!(
-        "bitcoin_psbt=prepared submission={} unsigned_txid={}",
-        submission,
-        psbt.unsigned_txid(),
     );
 
     // Publish the same packets that were persisted.
