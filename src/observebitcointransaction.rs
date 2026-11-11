@@ -74,8 +74,6 @@ impl ObservedBitcoinTransaction {
         }
     }
 
-   
-
     #[inline(always)]
     pub fn new_transact(
         manifold: &QuantPerm,
@@ -205,25 +203,58 @@ impl ObservedBitcoinTransaction {
             payload.outputs.len(),
         );
 
+        eprintln!(
+            "[bitcoin-materialize] inputs={} outputs={} fee_sat={} original_output_value_sat={} settlement_output_value_sat={}",
+            payload.inputs.len(),
+            payload.outputs.len(),
+            fee,
+            original_value,
+            settlement_value,
+        );
+
         let inputs = payload
             .inputs
             .into_iter()
-            .map(|input| TxIn {
-                previous_output: input.previous_output,
-                script_sig: input.script_sig,
-                sequence: input.sequence,
-                witness: input.witness,
+            .enumerate()
+            .map(|(index, input)| {
+                eprintln!(
+                    "[bitcoin-materialize-input] index={} outpoint={} is_null={} script_sig_bytes={} witness_items={} witness_bytes={} sequence={:?}",
+                    index,
+                    input.previous_output,
+                    input.previous_output.is_null(),
+                    input.script_sig.len(),
+                    input.witness.len(),
+                    input.witness.iter().map(|item| item.len()).sum::<usize>(),
+                    input.sequence,
+                );
+
+                TxIn {
+                    previous_output: input.previous_output,
+                    script_sig: input.script_sig,
+                    sequence: input.sequence,
+                    witness: input.witness,
+                }
             })
-            .collect();
+            .collect::<Vec<_>>();
 
         let outputs = payload
             .outputs
             .into_iter()
-            .map(|output| bitcoin::TxOut {
-                value: Amount::from_sat(output.value),
-                script_pubkey: output.script_pubkey,
+            .enumerate()
+            .map(|(index, output)| {
+                eprintln!(
+                    "[bitcoin-materialize-output] index={} value_sat={} script_pubkey_bytes={}",
+                    index,
+                    output.value,
+                    output.script_pubkey.len(),
+                );
+
+                bitcoin::TxOut {
+                    value: Amount::from_sat(output.value),
+                    script_pubkey: output.script_pubkey,
+                }
             })
-            .collect();
+            .collect::<Vec<_>>();
 
         let transaction = bitcoin::Transaction {
             version: bitcoin::transaction::Version(1),
@@ -232,12 +263,71 @@ impl ObservedBitcoinTransaction {
             output: outputs,
         };
 
+        let materialized_input_value = transaction
+            .input
+            .iter()
+            .map(|input| input.previous_output)
+            .collect::<Vec<_>>();
+
+        let materialized_output_value = transaction
+            .output
+            .iter()
+            .try_fold(0u64, |total, output| {
+                total.checked_add(output.value.to_sat())
+            })
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "Materialized transaction output value overflow",
+                )
+            })?;
+
+        for (index, input) in transaction.input.iter().enumerate() {
+            eprintln!(
+                "[bitcoin-materialized-input] tx_input={} outpoint={} null={} script_sig_bytes={} witness_items={} witness_bytes={}",
+                index,
+                input.previous_output,
+                input.previous_output.is_null(),
+                input.script_sig.len(),
+                input.witness.len(),
+                input.witness.iter().map(|item| item.len()).sum::<usize>(),
+            );
+        }
+
+        for (index, output) in transaction.output.iter().enumerate() {
+            eprintln!(
+                "[bitcoin-materialized-output] tx_output={} value_sat={} script_pubkey_bytes={}",
+                index,
+                output.value.to_sat(),
+                output.script_pubkey.len(),
+            );
+        }
+
+        eprintln!(
+            "[bitcoin-materialized] inputs={} outputs={} output_value_sat={} expected_settlement_value_sat={} input_outpoints={:?}",
+            transaction.input.len(),
+            transaction.output.len(),
+            materialized_output_value,
+            settlement_value,
+            materialized_input_value,
+        );
+
         let mut observed = Self::from_transaction(
             transaction,
             source,
         );
 
         observed.fee = Some(fee);
+
+        eprintln!(
+            "[bitcoin-materialized-complete] txid={} coinbase={} inputs={} outputs={} fee_sat={} weight={}",
+            observed.txid,
+            observed.coinbase,
+            observed.transaction.input.len(),
+            observed.transaction.output.len(),
+            fee,
+            observed.transaction.weight().to_wu(),
+        );
 
         Ok(observed)
     }
