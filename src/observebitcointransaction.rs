@@ -1,10 +1,8 @@
 
 use bitcoin::{
     Amount,
-    ScriptBuf,
     TxIn,
     Txid,
-    Witness,
 };
 use quantom_value::QuantPerm;
 use qp_hd::protocolvalue::Qtm;
@@ -75,8 +73,7 @@ impl ObservedBitcoinTransaction {
         mut payload: BitcoinPayload,
         source: BitcoinObservationSource,
     ) -> ObservationResult<Self> {
-        let coordinate: [u8; 32] =
-            Qtm::derive_coordinate(manifold);
+        let coordinate = Qtm::derive_coordinate(manifold);
 
         let fee = u64::try_from(payload.fee_mass(manifold))
             .map_err(|error| {
@@ -88,7 +85,6 @@ impl ObservedBitcoinTransaction {
                 )
             })?;
 
-        // Deduct the settlement fee once from output vout=0.
         let settlement_output = payload
             .outputs
             .iter_mut()
@@ -115,12 +111,7 @@ impl ObservedBitcoinTransaction {
 
         let settlement_value = settlement_output.value;
 
-        // Assign every payload output independently.
-        // Assignment establishes the new output script and retained value.
         payload.outputs.sort_by_key(|output| output.vout);
-
-        let mut assigned_outputs =
-            Vec::with_capacity(payload.outputs.len());
 
         for (position, output) in
             payload.outputs.iter_mut().enumerate()
@@ -137,7 +128,7 @@ impl ObservedBitcoinTransaction {
                 .into());
             }
 
-            let original_script = output.script_pubkey.clone();
+            let previous_script = output.script_pubkey.clone();
 
             let retained = output.assign(
                 manifold,
@@ -149,11 +140,9 @@ impl ObservedBitcoinTransaction {
                 output.vout,
                 output.value,
                 retained.mass,
-                original_script.len(),
+                previous_script.len(),
                 output.script_pubkey.len(),
             );
-
-            assigned_outputs.push(retained);
         }
 
         eprintln!(
@@ -161,26 +150,20 @@ impl ObservedBitcoinTransaction {
             fee,
             original_value,
             settlement_value,
-            assigned_outputs.len(),
+            payload.outputs.len(),
         );
 
-        // Materialize the supplied input outpoints.
-        // Signing data is intentionally empty at transaction creation.
-        // Preserve each input's outpoint and sequence.
-        let inputs: Vec<TxIn> = payload
+        let inputs = payload
             .inputs
             .into_iter()
-            .map(|input| {
-                TxIn {
-                    previous_output: input.previous_output,
-                    script_sig: ScriptBuf::new(),
-                    sequence: input.sequence,
-                    witness: Witness::new(),
-                }
+            .map(|input| TxIn {
+                previous_output: input.previous_output,
+                script_sig: input.script_sig,
+                sequence: input.sequence,
+                witness: input.witness,
             })
             .collect();
 
-        // Materialize assigned outputs in vout order.
         let outputs = payload
             .outputs
             .into_iter()
@@ -205,18 +188,5 @@ impl ObservedBitcoinTransaction {
         observed.fee = Some(fee);
 
         Ok(observed)
-    }
-
-    #[inline(always)]
-    pub fn new_transaction(
-        manifold: &QuantPerm,
-        payload: BitcoinPayload,
-        source: BitcoinObservationSource,
-    ) -> ObservationResult<Self> {
-        Self::new_transact(
-            manifold,
-            payload,
-            source,
-        )
     }
 }
