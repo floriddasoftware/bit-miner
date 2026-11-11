@@ -25,16 +25,15 @@ pub type BitcoinPsbtResult<T> =
 // Previous output resolution
 // -----------------------------------------------------------------------------
 
-/// The previous output spent by one input of the unsigned settlement.
+/// The exact previous output identified by an input OutPoint.
 ///
-/// `outpoint` identifies the exact input being resolved.
-/// `output` supplies the UTXO data required by PSBT construction.
-/// `non_witness_utxo` is retained when the resolver has the complete
-/// previous transaction, allowing legacy inputs to be signed safely.
+/// The resolver supplies the TxOut corresponding to the identified
+/// transaction ID and output index.
+///
+/// Only witness_utxo is used during PSBT construction.
 pub struct ResolvedPrevout {
     pub outpoint: OutPoint,
     pub output: TxOut,
-    pub non_witness_utxo: Option<Transaction>,
 }
 
 pub trait PrevoutResolver {
@@ -81,6 +80,9 @@ impl BitcoinPsbt {
     ///
     /// The resolved collection must correspond one-to-one with the
     /// unsigned transaction inputs, in their original transaction order.
+    ///
+    /// Each previous output is attached exclusively through witness_utxo.
+    /// No previous transaction is fetched, reconstructed, or attached.
     #[inline]
     pub fn from_settlement(
         finalized: FinalizedSettlement,
@@ -107,6 +109,7 @@ impl BitcoinPsbt {
             transaction.input.len(),
         );
 
+        // Validate exact outpoint identity and transaction order.
         for (index, (tx_input, prevout)) in transaction
             .input
             .iter()
@@ -136,75 +139,22 @@ impl BitcoinPsbt {
                 )
                 .into());
             }
-
-            if let Some(previous_transaction) =
-                &prevout.non_witness_utxo
-            {
-                let previous_txid =
-                    previous_transaction.compute_txid();
-
-                if previous_txid != prevout.outpoint.txid {
-                    return Err(IoError::new(
-                        ErrorKind::InvalidData,
-                        format!(
-                            "previous transaction txid mismatch at input {}: expected={} resolved={}",
-                            index,
-                            prevout.outpoint.txid,
-                            previous_txid,
-                        ),
-                    )
-                    .into());
-                }
-
-                let previous_output = previous_transaction
-                    .output
-                    .get(prevout.outpoint.vout as usize)
-                    .ok_or_else(|| {
-                        IoError::new(
-                            ErrorKind::InvalidData,
-                            format!(
-                                "previous output vout does not exist at input {}: txid={} vout={}",
-                                index,
-                                prevout.outpoint.txid,
-                                prevout.outpoint.vout,
-                            ),
-                        )
-                    })?;
-
-                if previous_output != &prevout.output {
-                    return Err(IoError::new(
-                        ErrorKind::InvalidData,
-                        format!(
-                            "resolved previous output does not match previous transaction at input {}",
-                            index,
-                        ),
-                    )
-                    .into());
-                }
-            }
         }
 
-        // Build the PSBT from the original unsigned transaction.
-        // Its inputs are never reconstructed or replaced.
+        // Preserve the exact finalized transaction.
+        // Inputs and outputs are not reconstructed or replaced.
         let unsigned_txid = transaction.compute_txid();
 
         let mut psbt = Psbt::from_unsigned_tx(transaction)?;
 
-        // Attach each resolved previous output to its corresponding
-        // PSBT input without changing unsigned transaction input order.
+        // Attach the exact resolved previous output to its
+        // corresponding input using witness_utxo exclusively.
         for (psbt_input, prevout) in psbt
             .inputs
             .iter_mut()
             .zip(resolved_prevouts.into_iter())
         {
             psbt_input.witness_utxo = Some(prevout.output);
-
-            if let Some(previous_transaction) =
-                prevout.non_witness_utxo
-            {
-                psbt_input.non_witness_utxo =
-                    Some(previous_transaction);
-            }
         }
 
         Ok(Self {
