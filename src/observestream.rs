@@ -783,7 +783,7 @@ pub fn refresh<R: PrevoutResolver>(
 
         let manifold = &direction.heritage().state;
 
-        let transaction = &psbt.psbt.unsigned_tx;
+        let transaction = &psbt.psbt.unsigned_tx.clone();
 
         if transaction.input.len() != psbt.psbt.inputs.len() {
             return Err(SettlementError::Backend(format!(
