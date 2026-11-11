@@ -1,4 +1,3 @@
-
 use bitcoin::{
     Amount,
     TxIn,
@@ -75,11 +74,20 @@ impl ObservedBitcoinTransaction {
     }
 
     #[inline(always)]
+    pub fn new_transaction(
+        manifold: &QuantPerm,
+        payload: BitcoinPayload,
+        source: BitcoinObservationSource,
+    ) -> ObservationResult<(Self, BitcoinPayload)> {
+        Self::new_transact(manifold, payload, source)
+    }
+
+    #[inline(always)]
     pub fn new_transact(
         manifold: &QuantPerm,
         mut payload: BitcoinPayload,
         source: BitcoinObservationSource,
-    ) -> ObservationResult<Self> {
+    ) -> ObservationResult<(Self, BitcoinPayload)> {
         let coordinate = Qtm::derive_coordinate(manifold);
 
         let fee = u64::try_from(payload.fee_mass(manifold))
@@ -212,6 +220,8 @@ impl ObservedBitcoinTransaction {
             settlement_value,
         );
 
+        let materialized_payload = payload.clone();
+
         let inputs = payload
             .inputs
             .into_iter()
@@ -329,6 +339,6 @@ impl ObservedBitcoinTransaction {
             observed.transaction.weight().to_wu(),
         );
 
-        Ok(observed)
+        Ok((observed, materialized_payload))
     }
 }
