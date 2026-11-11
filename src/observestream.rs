@@ -19,7 +19,10 @@ use qp_hd::commands::{
     load_qtm_at_activation,
 };
 use qp_hd::pathsregistry::CoinType;
-use qtm_graph::graph::frame::Depth;
+use qtm_graph::graph::{
+    frame::{Depth, Direction},
+    Scale,
+};
 use serde_json::Value;
 use tokio::net::TcpStream;
 use tokio_tungstenite::{
