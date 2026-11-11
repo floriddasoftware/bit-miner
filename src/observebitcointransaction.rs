@@ -7,13 +7,20 @@ use bitcoin::{
 use quantom_value::QuantPerm;
 use qp_hd::protocolvalue::Qtm;
 
-use crate::bitcoinpayload::{
-    BitcoinPayload,
-    PayloadComponent,
-};
-use crate::observestream::{
-    BitcoinObservation,
-    BitcoinObservationSource,
+use crate::{
+    bitcoinpayload::{
+        BitcoinPayload,
+        PayloadComponent,
+    },
+    bitcoinpsbt::{
+        PrevoutResolver,
+        ResolvedPrevout,
+    },
+    broadcast::WirePacket,
+    observestream::{
+        BitcoinObservation,
+        BitcoinObservationSource,
+    },
 };
 
 type ObservationResult<T> =
