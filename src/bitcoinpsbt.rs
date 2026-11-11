@@ -15,7 +15,10 @@ use bitcoin::{
 
 use crate::{
     bitcoinreceipt::SettlementReceipt,
-    broadcast::FinalizedSettlement,
+    broadcast::{
+        FinalizedSettlement,
+        WirePacket,
+    },
 };
 
 pub type BitcoinPsbtResult<T> =
@@ -27,20 +30,104 @@ pub type BitcoinPsbtResult<T> =
 
 /// The exact previous output identified by an input OutPoint.
 ///
-/// The resolver supplies the TxOut corresponding to the identified
-/// transaction ID and output index.
-///
-/// Only witness_utxo is used during PSBT construction.
+/// The submission and commitment identify the parent QTM event
+/// responsible for producing this output.
 pub struct ResolvedPrevout {
     pub outpoint: OutPoint,
     pub output: TxOut,
+    pub submission: u64,
+    pub commitment: [u8; 32],
 }
 
 pub trait PrevoutResolver {
+    /// Resolve an input against its actual parent submission.
+    ///
+    /// The resolver must use both values to locate the parent
+    /// output in the specified substrate activation.
     fn resolve(
         &self,
         outpoint: &OutPoint,
+        submission: u64,
+        commitment: [u8; 32],
     ) -> BitcoinPsbtResult<ResolvedPrevout>;
+
+    /// Resolve directly from the parent's persisted wire packet.
+    ///
+    /// The packet supplies the exact outpoint and commitment.
+    /// The caller supplies the submission that owns that packet.
+    #[inline]
+    fn resolve_packet(
+        &self,
+        packet: &WirePacket,
+        submission: u64,
+    ) -> BitcoinPsbtResult<ResolvedPrevout> {
+        let resolved = self.resolve(
+            &packet.outpoint,
+            submission,
+            packet.commitment,
+        )?;
+
+        if resolved.outpoint != packet.outpoint {
+            return Err(IoError::new(
+                ErrorKind::InvalidData,
+                format!(
+                    "resolved parent outpoint mismatch: packet={} resolved={}",
+                    packet.outpoint,
+                    resolved.outpoint,
+                ),
+            )
+            .into());
+        }
+
+        if resolved.submission != submission {
+            return Err(IoError::new(
+                ErrorKind::InvalidData,
+                format!(
+                    "resolved parent submission mismatch: expected={} resolved={}",
+                    submission,
+                    resolved.submission,
+                ),
+            )
+            .into());
+        }
+
+        if resolved.commitment != packet.commitment {
+            return Err(IoError::new(
+                ErrorKind::InvalidData,
+                format!(
+                    "resolved parent commitment mismatch: submission={}",
+                    submission,
+                ),
+            )
+            .into());
+        }
+
+        if resolved.output.value.to_sat() != packet.value {
+            return Err(IoError::new(
+                ErrorKind::InvalidData,
+                format!(
+                    "resolved parent value mismatch: outpoint={} packet={} resolved={}",
+                    packet.outpoint,
+                    packet.value,
+                    resolved.output.value.to_sat(),
+                ),
+            )
+            .into());
+        }
+
+        if resolved.output.script_pubkey != packet.script_pubkey {
+            return Err(IoError::new(
+                ErrorKind::InvalidData,
+                format!(
+                    "resolved parent script mismatch: outpoint={}",
+                    packet.outpoint,
+                ),
+            )
+            .into());
+        }
+
+        Ok(resolved)
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -78,11 +165,10 @@ impl BitcoinPsbt {
     /// Constructs a PSBT from the exact finalized settlement transaction
     /// and its resolved previous outputs.
     ///
-    /// The resolved collection must correspond one-to-one with the
-    /// unsigned transaction inputs, in their original transaction order.
+    /// Resolved prevouts must correspond one-to-one with the unsigned
+    /// transaction inputs in their original transaction order.
     ///
     /// Each previous output is attached exclusively through witness_utxo.
-    /// No previous transaction is fetched, reconstructed, or attached.
     #[inline]
     pub fn from_settlement(
         finalized: FinalizedSettlement,
@@ -109,7 +195,6 @@ impl BitcoinPsbt {
             transaction.input.len(),
         );
 
-        // Validate exact outpoint identity and transaction order.
         for (index, (tx_input, prevout)) in transaction
             .input
             .iter()
@@ -141,14 +226,12 @@ impl BitcoinPsbt {
             }
         }
 
-        // Preserve the exact finalized transaction.
-        // Inputs and outputs are not reconstructed or replaced.
         let unsigned_txid = transaction.compute_txid();
 
+        // Preserve the exact finalized transaction.
         let mut psbt = Psbt::from_unsigned_tx(transaction)?;
 
-        // Attach the exact resolved previous output to its
-        // corresponding input using witness_utxo exclusively.
+        // Attach only the exact resolved previous outputs.
         for (psbt_input, prevout) in psbt
             .inputs
             .iter_mut()
