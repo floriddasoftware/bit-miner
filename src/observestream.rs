@@ -746,6 +746,18 @@ pub fn refresh<R: PrevoutResolver>(
         psbt.unsigned_txid(),
     );
 
+
+let direction = pipeline
+    .render_state()
+    .direction
+    .as_ref()
+    .ok_or_else(|| {
+        SettlementError::Backend(
+            "QP render direction is unavailable for Bitcoin signing".into(),
+        )
+    })?;
+
+let manifold = &direction.heritage().state;
     // Publish only after successful PSBT preparation.
     for packet in wire_packets {
         pipeline
