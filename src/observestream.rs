@@ -1,4 +1,3 @@
-Here is the refactored and complete code file. The historical submission iteration loop has been removed for prevout resolution. Instead, prevouts are now resolved directly by querying the resolver with the exact outpoint specified by each input in the materialized_payload, completely decoupling parent-output lookup from submission numbering:
 use crate::qpoutputsbitcoininput::BitcoinInput;
 use std::{
     collections::{HashSet, VecDeque},
@@ -46,8 +45,8 @@ use crate::{
 
 pub type Blockchain = CoinType;
 
-pub type ObservationResult<T> =
-    Result<T, Box<dyn Error + Send + Sync>>;
+pub type ObservationResult =
+    Result>;
 
 pub type PipelineOutcome =
     Result<
@@ -105,11 +104,11 @@ impl BitcoinObservation {
 
 /// Owns one WebSocket connection and decodes Bitcoin transactions.
 pub struct MempoolSpaceStream {
-    socket: WebSocketStream<MaybeTlsStream<TcpStream>>,
+    socket: WebSocketStream>,
     client: reqwest::Client,
     source: BitcoinObservationSource,
     mode: MempoolStreamMode,
-    pending: VecDeque<BitcoinObservation>,
+    pending: VecDeque,
     skipped: u64,
 }
 
@@ -117,7 +116,7 @@ impl MempoolSpaceStream {
     pub async fn connect(
         activation: u64,
         mode: MempoolStreamMode,
-    ) -> ObservationResult<Self> {
+    ) -> ObservationResult {
         let (mut socket, _) =
             connect_async(MEMPOOL_SPACE_WS).await?;
 
@@ -164,7 +163,7 @@ impl MempoolSpaceStream {
     /// Returns the next decoded transaction from the WebSocket feed.
     pub async fn next_observation(
         &mut self,
-    ) -> ObservationResult<BitcoinObservation> {
+    ) -> ObservationResult {
         loop {
             if let Some(observation) = self.pending.pop_front() {
                 return Ok(observation);
@@ -176,12 +175,12 @@ impl MempoolSpaceStream {
 
     /// Passes the next transaction through settlement construction
     /// and PSBT preparation.
-    pub async fn stream<R: PrevoutResolver>(
+    pub async fn stream(
         &mut self,
         substrate: &str,
         pipeline: &mut BitcoinObservationPipeline,
         resolver: &R,
-    ) -> ObservationResult<PipelineOutcome> {
+    ) -> ObservationResult {
         let observation = self.next_observation().await?;
 
         let BitcoinObservation::Transaction(transaction) =
@@ -231,8 +230,8 @@ impl MempoolSpaceStream {
         &mut self,
         value: &Value,
     ) -> ObservationResult<()> {
-        let mut ids = Vec::<String>::new();
-        let mut seen = HashSet::<String>::new();
+        let mut ids = Vec::::new();
+        let mut seen = HashSet::::new();
 
         if let Some(entries) =
             added(value, "mempool-transactions")
@@ -298,7 +297,7 @@ impl MempoolSpaceStream {
                 }
             };
 
-            match fetch_decode::<bitcoin::Transaction>(
+            match fetch_decode::(
                 &self.client,
                 format!("{MEMPOOL_SPACE_API}/tx/{txid}/raw"),
             )
@@ -326,25 +325,25 @@ impl MempoolSpaceStream {
 fn added<'a>(
     value: &'a Value,
     key: &str,
-) -> Option<&'a Vec<Value>> {
+) -> Option<&'a Vec> {
     value.get(key)?.get("added")?.as_array()
 }
 
 #[inline(always)]
 fn decode_hex_transaction(
     hex_tx: &str,
-) -> ObservationResult<bitcoin::Transaction> {
+) -> ObservationResult {
     let raw = hex::decode(hex_tx)?;
 
-    Ok(bitcoin::consensus::deserialize::<bitcoin::Transaction>(
+    Ok(bitcoin::consensus::deserialize::(
         &raw,
     )?)
 }
 
-async fn fetch_decode<T: Decodable>(
+async fn fetch_decode(
     client: &reqwest::Client,
     url: String,
-) -> ObservationResult<T> {
+) -> ObservationResult {
     let raw = client
         .get(url)
         .send()
@@ -353,12 +352,11 @@ async fn fetch_decode<T: Decodable>(
         .bytes()
         .await?;
 
-    Ok(bitcoin::consensus::deserialize::<T>(&raw)?)
+    Ok(bitcoin::consensus::deserialize::(&raw)?)
 }
 
-
 #[inline(always)]
-pub fn refresh<R: PrevoutResolver>(
+pub fn refresh(
     pipeline: &mut BitcoinObservationPipeline,
     substrate: &str,
     observed: ObservedBitcoinTransaction,
@@ -574,21 +572,30 @@ pub fn refresh<R: PrevoutResolver>(
         persisted_bytes.len(),
     );
 
+    let qtm = load_qtm_at_activation(substrate, activation);
+    let private_key = qtm.coordinate;
+    let heritage = qtm_open_manifold_until(substrate, activation);
+
+    // Parent provenance is the heritage activity state activation.
+    // outpoint.vout is only the output index inside the parent transaction.
+    // All inputs in this settlement share the same parent activity state.
+    let parent_submission = heritage.state.activation;
+
     let mut resolved_prevouts =
         Vec::with_capacity(finalized.transaction.input.len());
 
-    // Resolve prevouts directly via the resolver using the precise outpoints from the materialized payload inputs,
-    // avoiding historical submission sequence lookups.
     for (input_index, payload_input) in materialized_payload.inputs.iter().enumerate() {
         let outpoint = &payload_input.previous_output;
 
         let resolved = resolver
-            .resolve(outpoint)
+            .resolve(outpoint, parent_submission, qtm.commitment)
             .map_err(|error| {
                 SettlementError::Backend(format!(
-                    "direct outpoint resolution failed: input={} outpoint={}: {}",
+                    "outpoint resolution failed: input={} outpoint={} parent_submission={} commitment={}: {}",
                     input_index,
                     outpoint,
+                    parent_submission,
+                    hex::encode(qtm.commitment),
                     error,
                 ))
             })?;
@@ -616,10 +623,6 @@ pub fn refresh<R: PrevoutResolver>(
         submission,
         psbt.unsigned_txid(),
     );
-
-    let qtm = load_qtm_at_activation(substrate, activation);
-    let private_key = qtm.coordinate;
-    let heritage = qtm_open_manifold_until(substrate, activation);
 
     pipeline
         .render_state_mut()
@@ -683,7 +686,7 @@ pub fn refresh<R: PrevoutResolver>(
 #[inline(always)]
 fn decode_wirepackets(
     bytes: &[u8],
-) -> Result<Vec<WirePacket>, SettlementError> {
+) -> Result, SettlementError> {
     if bytes.is_empty() {
         return Err(SettlementError::Backend(
             "persisted wire-packet file is empty".into(),
@@ -760,4 +763,3 @@ fn decode_wirepackets(
 
     Ok(packets)
 }
-
