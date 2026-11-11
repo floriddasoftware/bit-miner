@@ -649,7 +649,7 @@ pub fn refresh<R: PrevoutResolver>(
         persisted_bytes.len(),
     );
 
-    let mut resolved_prevouts = Vec::with_capacity(
+        let mut resolved_prevouts = Vec::with_capacity(
         finalized.transaction.input.len(),
     );
 
@@ -661,20 +661,57 @@ pub fn refresh<R: PrevoutResolver>(
     {
         let outpoint = &input.previous_output;
 
-        let parent = persisted.iter().find_map(
-            |(parent_submission, parent_commitment, packets)| {
-                packets
-                    .iter()
-                    .find(|packet| {
-                        packet.outpoint == *outpoint
-                    })
-                    .map(|packet| (
-                        *parent_submission,
-                        *parent_commitment,
-                        packet,
-                    ))
-            },
-        );
+        let mut parent = None;
+
+        for parent_submission in 1..=persisted_submission {
+            // Submission numbers start at 1.
+            // The persisted transaction collection starts at index 0.
+            let parent_index = usize::try_from(
+                parent_submission - 1,
+            )
+            .map_err(|error| {
+                SettlementError::Backend(format!(
+                    "parent submission index conversion failed: submission={}: {}",
+                    parent_submission,
+                    error,
+                ))
+            })?;
+
+            let Some((
+                stored_submission,
+                parent_commitment,
+                packets,
+            )) = persisted.get(parent_index) else {
+                return Err(SettlementError::Backend(format!(
+                    "persisted parent transaction is missing: input={} submission={} index={}",
+                    input_index,
+                    parent_submission,
+                    parent_index,
+                )));
+            };
+
+            if *stored_submission != parent_submission {
+                return Err(SettlementError::Backend(format!(
+                    "persisted submission index mismatch: input={} expected_submission={} actual_submission={} index={}",
+                    input_index,
+                    parent_submission,
+                    stored_submission,
+                    parent_index,
+                )));
+            }
+
+            if let Some(packet) = packets.iter().find(|packet| {
+                packet.outpoint == *outpoint
+            }) {
+                parent = Some((
+                    parent_submission,
+                    *parent_commitment,
+                    packet,
+                ));
+
+                break;
+            }
+        }
 
         let Some((
             parent_submission,
@@ -682,9 +719,10 @@ pub fn refresh<R: PrevoutResolver>(
             parent_packet,
         )) = parent else {
             return Err(SettlementError::Backend(format!(
-                "parent output has no persisted submission: input={} outpoint={}",
+                "parent transaction output has no persisted submission: input={} outpoint={} searched_submissions=1..={}",
                 input_index,
                 outpoint,
+                persisted_submission,
             )));
         };
 
@@ -714,11 +752,15 @@ pub fn refresh<R: PrevoutResolver>(
             })?;
 
         if resolved.outpoint != *outpoint
-            || resolved.output.value.to_sat() != parent_packet.value
-            || resolved.output.script_pubkey != parent_packet.script_pubkey
+            || resolved.submission != parent_submission
+            || resolved.commitment != parent_commitment
+            || resolved.output.value.to_sat()
+                != parent_packet.value
+            || resolved.output.script_pubkey
+                != parent_packet.script_pubkey
         {
             return Err(SettlementError::Backend(format!(
-                "resolved parent output differs from persisted packet: input={} submission={} outpoint={}",
+                "resolved parent output differs from persisted transaction: input={} submission={} outpoint={}",
                 input_index,
                 parent_submission,
                 outpoint,
