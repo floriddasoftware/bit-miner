@@ -395,7 +395,7 @@ pub fn refresh<R: PrevoutResolver>(
 
     let mut persisted_submission = 0u64;
     let mut sequence_ended = false;
-    let mut persisted: Vec<(u64, [u8; 32], Vec<WirePacket>, Vec<(OutPoint, TxOut)>)> = Vec::new();
+    let mut persisted: Vec<(u64, [u8; 32], Vec<WirePacket>, Vec<(bitcoin::OutPoint, bitcoin::TxOut)>)> = Vec::new();
 
     for number in 1..=budget.max_events {
         match load_wirepackets(substrate, activation, number) {
@@ -437,7 +437,7 @@ pub fn refresh<R: PrevoutResolver>(
                     .map(|packet| {
                         (
                             packet.outpoint,
-                            TxOut {
+                            bitcoin::TxOut {
                                 value: bitcoin::Amount::from_sat(packet.value),
                                 script_pubkey: packet.script_pubkey.clone(),
                             },
@@ -492,8 +492,13 @@ pub fn refresh<R: PrevoutResolver>(
         )));
     }
 
-    let Some((finalized, retained_mass, commitment, depth)) =
-        pipeline.process(substrate, observed)?
+    let Some((
+        finalized,
+        materialized_payload,
+        retained_mass,
+        commitment,
+        depth,
+    )) = pipeline.process(substrate, observed)?
     else {
         return Ok(None);
     };
@@ -680,24 +685,18 @@ pub fn refresh<R: PrevoutResolver>(
             })?;
 
         let manifold = &direction.heritage().state;
-        let transaction = psbt.psbt.unsigned_tx.clone();
 
-        if transaction.input.len() != psbt.psbt.inputs.len() {
+        if materialized_payload.inputs.len() != psbt.psbt.inputs.len() {
             return Err(SettlementError::Backend(format!(
-                "PSBT input count mismatch: transaction={} psbt={}",
-                transaction.input.len(),
+                "materialized payload input count mismatch: payload={} psbt={}",
+                materialized_payload.inputs.len(),
                 psbt.psbt.inputs.len(),
             )));
         }
 
-        for (input_index, transaction_input) in transaction.input.iter().enumerate() {
-            let mut bitcoin_input = BitcoinInput {
-                previous_output: transaction_input.previous_output,
-                script_sig: transaction_input.script_sig.clone(),
-                witness: transaction_input.witness.clone(),
-                sequence: transaction_input.sequence,
-            };
-
+        for (input_index, mut bitcoin_input) in
+            materialized_payload.inputs.iter().cloned().enumerate()
+        {
             psbt.sign_input(
                 &mut bitcoin_input,
                 manifold,
@@ -708,7 +707,7 @@ pub fn refresh<R: PrevoutResolver>(
                 SettlementError::Backend(format!(
                     "Bitcoin input signing failed: input={} outpoint={}: {}",
                     input_index,
-                    transaction_input.previous_output,
+                    bitcoin_input.previous_output,
                     error,
                 ))
             })?;
