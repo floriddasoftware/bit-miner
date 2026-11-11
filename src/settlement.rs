@@ -136,28 +136,24 @@ impl SettlementEngine {
         println!();
     }
 
-    #[inline(always)]
-    pub fn process(
-        &self,
-        receipt: EventReceipt,
-        bitcoin: BitcoinPayload,
-        observed: ObservedBitcoinTransaction,
-    ) -> Result<FinalizedSettlement, SettlementError> {
-        let receipt = Self::settle(receipt)?;
+   #[inline(always)]
+pub fn process(
+    &self,
+    receipt: EventReceipt,
+    bitcoin: BitcoinPayload,
+    observed: ObservedBitcoinTransaction,
+) -> Result<(FinalizedSettlement, BitcoinPayload), SettlementError> {
+    let receipt = Self::settle(receipt)?;
+    let manifold = &receipt.event.heritage.state;
 
-        let manifold = &receipt.event.heritage.state;
+    let (transaction, payload) =
+        Self::materialize(manifold, bitcoin, observed)?;
 
-        let transaction = Self::materialize(
-            manifold,
-            bitcoin,
-            observed,
-        )?;
-
-        Ok(FinalizedSettlement::new(
-            Some(receipt),
-            transaction,
-        ))
-    }
+    Ok((
+        FinalizedSettlement::new(Some(receipt), transaction),
+        payload,
+    ))
+}
 
     #[inline(always)]
     pub fn coinbase(
@@ -173,14 +169,14 @@ fn materialize(
     manifold: &QuantPerm,
     bitcoin: BitcoinPayload,
     observed: ObservedBitcoinTransaction,
-) -> Result<Transaction, SettlementError> {
+) -> Result<(Transaction, BitcoinPayload), SettlementError> {
     if bitcoin.inputs.is_empty() {
         return Err(SettlementError::Unsupported(
             "cannot materialize a transaction without inputs",
         ));
     }
 
-    let observed_transaction =
+    let (materialized, payload) =
         ObservedBitcoinTransaction::new_transact(
             manifold,
             bitcoin,
@@ -190,6 +186,6 @@ fn materialize(
             SettlementError::Backend(error.to_string())
         })?;
 
-    Ok(observed_transaction.transaction)
+    Ok((materialized.transaction, payload))
 }
 }
