@@ -13,11 +13,17 @@ use bitcoin::{
     psbt::Psbt,
 };
 
+use quantom_value::{QuantPerm, Retain};
+
 use crate::{
     bitcoinreceipt::SettlementReceipt,
     broadcast::{
         FinalizedSettlement,
         WirePacket,
+    },
+    qpoutputsbitcoininput::{
+        BitcoinInput,
+        SigningError,
     },
 };
 
@@ -245,6 +251,51 @@ impl BitcoinPsbt {
             psbt,
             unsigned_txid,
         })
+    }
+
+    /// Signs one PSBT input using the BitcoinInput signing implementation.
+    ///
+    /// The PSBT's unsigned transaction and witness_utxo provide the
+    /// transaction and exact previous-output data used by sign().
+    #[inline]
+    pub fn sign_input(
+        &mut self,
+        input: &mut BitcoinInput,
+        manifold: &QuantPerm,
+        private_key: [u8; 32],
+        input_index: usize,
+    ) -> Result<Retain, SigningError> {
+        let psbt_input = self
+            .psbt
+            .inputs
+            .get(input_index)
+            .ok_or(SigningError::InputIndexOutOfRange {
+                index: input_index,
+                input_count: self.psbt.inputs.len(),
+            })?;
+
+        let previous_output = psbt_input
+            .witness_utxo
+            .as_ref()
+            .ok_or(SigningError::PreviousOutputMismatch {
+                index: input_index,
+            })?;
+
+        let transaction = self.psbt.unsigned_tx.clone();
+
+        let retained = input.sign(
+            manifold,
+            private_key,
+            &transaction,
+            input_index,
+            previous_output.value.to_sat(),
+            &previous_output.script_pubkey,
+        )?;
+
+        self.psbt.inputs[input_index].final_script_witness =
+            Some(input.witness.clone());
+
+        Ok(retained)
     }
 
     #[inline(always)]
