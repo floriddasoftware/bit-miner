@@ -85,33 +85,31 @@ impl ObservedBitcoinTransaction {
                 )
             })?;
 
-        let settlement_output = payload
-            .outputs
-            .iter_mut()
-            .find(|output| output.vout == 0)
-            .ok_or_else(|| {
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "Settlement spread output vout=0 not found",
-                )
-            })?;
-
-        let original_value = settlement_output.value;
-
-        settlement_output.value = original_value
-            .checked_sub(fee)
-            .ok_or_else(|| {
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    format!(
-                        "Insufficient settlement output value: value={original_value} sat, fee={fee} sat",
-                    ),
-                )
-            })?;
-
-        let settlement_value = settlement_output.value;
-
         payload.outputs.sort_by_key(|output| output.vout);
+
+        let original_value = payload.outputs.iter().try_fold(
+            0u64,
+            |total, output| {
+                total.checked_add(output.value).ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "Settlement output value overflow",
+                    )
+                })
+            },
+        )?;
+
+        if original_value < fee {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "Insufficient total settlement output value: value={original_value} sat, fee={fee} sat",
+                ),
+            )
+            .into());
+        }
+
+        let mut remaining_fee = fee;
 
         for (position, output) in
             payload.outputs.iter_mut().enumerate()
@@ -128,6 +126,30 @@ impl ObservedBitcoinTransaction {
                 .into());
             }
 
+            let fee_deduction = output.value.min(remaining_fee);
+
+            output.value = output
+                .value
+                .checked_sub(fee_deduction)
+                .ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        format!(
+                            "Settlement fee deduction failed at vout={}",
+                            output.vout,
+                        ),
+                    )
+                })?;
+
+            remaining_fee = remaining_fee
+                .checked_sub(fee_deduction)
+                .ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "Remaining settlement fee underflow",
+                    )
+                })?;
+
             let previous_script = output.script_pubkey.clone();
 
             let retained = output.assign(
@@ -136,14 +158,35 @@ impl ObservedBitcoinTransaction {
             )?;
 
             eprintln!(
-                "[bitcoin-retain] vout={} value_sat={} assigned_retained_mass={} previous_script_bytes={} assigned_script_bytes={}",
+                "[bitcoin-retain] vout={} value_sat={} fee_deduction_sat={} remaining_fee_sat={} assigned_retained_mass={} previous_script_bytes={} assigned_script_bytes={}",
                 output.vout,
                 output.value,
+                fee_deduction,
+                remaining_fee,
                 retained.mass,
                 previous_script.len(),
                 output.script_pubkey.len(),
             );
         }
+
+        if remaining_fee != 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "Settlement fee was not fully allocated: remaining={remaining_fee} sat",
+                ),
+            )
+            .into());
+        }
+
+        let settlement_value = original_value
+            .checked_sub(fee)
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "Settlement value underflow",
+                )
+            })?;
 
         eprintln!(
             "[bitcoin-retain] fee_sat={} settlement_value_sat={}->{} assigned_outputs={}",
