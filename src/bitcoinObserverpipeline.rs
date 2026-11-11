@@ -1,6 +1,5 @@
 
 use qp_hd::commands::{
-    load_budget,
     load_event_at_activation,
     qtm_open_manifold_until,
     PersistedEvent,
@@ -111,39 +110,6 @@ impl BitcoinObservationPipeline {
                     substrate,
                 ))
             })?;
-
-        let budget = load_budget(
-            substrate,
-            activation,
-            &self.network,
-        )
-        .map_err(|error| {
-            SettlementError::Backend(format!(
-                "failed to load event budget for substrate={} activation={} network={}: {}",
-                substrate,
-                activation,
-                self.network,
-                error,
-            ))
-        })?;
-
-        let submissions = self
-            .miner
-            .submissions
-            .get(substrate)
-            .copied()
-            .unwrap_or(0);
-
-        if submissions >= budget.max_events {
-            return Err(SettlementError::Backend(format!(
-                "submission budget exhausted: substrate={} activation={} network={} submissions={} max_events={}",
-                substrate,
-                activation,
-                self.network,
-                submissions,
-                budget.max_events,
-            )));
-        }
 
         let current = qtm_open_manifold_until(
             substrate,
