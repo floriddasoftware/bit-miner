@@ -74,30 +74,7 @@ impl ObservedBitcoinTransaction {
         }
     }
 
-    #[inline(always)]
-    pub fn resolve_wire_packet_inputs<R: PrevoutResolver>(
-        &self,
-        packet: &WirePacket,
-        resolver: &R,
-    ) -> ObservationResult<Vec<ResolvedPrevout>> {
-        let packet_txid = packet.txid();
-
-        if self.txid != packet_txid
-            || self.transaction.compute_txid() != packet_txid
-        {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "wire packet txid does not match observed settlement transaction",
-            )
-            .into());
-        }
-
-        self.transaction
-            .input
-            .iter()
-            .map(|input| resolver.resolve(&input.previous_output))
-            .collect()
-    }
+   
 
     #[inline(always)]
     pub fn new_transact(
