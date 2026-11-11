@@ -1,4 +1,3 @@
-use crate::qpoutputsbitcoininput::BitcoinInput;
 use std::{
     collections::{HashSet, VecDeque},
     error::Error,
@@ -6,23 +5,17 @@ use std::{
     str::FromStr,
 };
 
-use bitcoin::{
-    consensus::Decodable,
-    Txid,
-};
+use bitcoin::Txid;
 use futures_util::{SinkExt, StreamExt};
 use qp_hd::commands::{
     load_budget,
+    load_qtm_at_activation,
     load_wirepackets,
     persist_wirepackets,
     qtm_open_manifold_until,
-    load_qtm_at_activation,
 };
 use qp_hd::pathsregistry::CoinType;
-use qtm_graph::graph::{
-    frame::{Depth, Direction},
-    Scale,
-};
+use qtm_graph::graph::{frame::Depth, Scale};
 use serde_json::Value;
 use tokio::net::TcpStream;
 use tokio_tungstenite::{
@@ -33,10 +26,7 @@ use tokio_tungstenite::{
 };
 
 use crate::{
-    bitcoinpsbt::{
-        BitcoinPsbt,
-        PrevoutResolver,
-    },
+    bitcoinpsbt::{BitcoinPsbt, PrevoutResolver},
     broadcast::WirePacket,
     observebitcointransaction::ObservedBitcoinTransaction,
     settlement::SettlementError,
@@ -45,19 +35,11 @@ use crate::{
 
 pub type Blockchain = CoinType;
 
-pub type ObservationResult =
-    Result>;
+pub type ObservationResult<T> =
+    Result<T, Box<dyn Error + Send + Sync>>;
 
 pub type PipelineOutcome =
-    Result<
-        Option<(
-            BitcoinPsbt,
-            u128,
-            [u8; 32],
-            Depth,
-        )>,
-        SettlementError,
-    >;
+    Result<Option<(BitcoinPsbt, u128, [u8; 32], Depth)>, SettlementError>;
 
 const MEMPOOL_SPACE_WS: &str = "wss://mempool.space/api/v1/ws";
 const MEMPOOL_SPACE_API: &str = "https://mempool.space/api";
@@ -102,13 +84,12 @@ impl BitcoinObservation {
     }
 }
 
-/// Owns one WebSocket connection and decodes Bitcoin transactions.
 pub struct MempoolSpaceStream {
-    socket: WebSocketStream>,
+    socket: WebSocketStream<MaybeTlsStream<TcpStream>>,
     client: reqwest::Client,
     source: BitcoinObservationSource,
     mode: MempoolStreamMode,
-    pending: VecDeque,
+    pending: VecDeque<BitcoinObservation>,
     skipped: u64,
 }
 
@@ -116,9 +97,8 @@ impl MempoolSpaceStream {
     pub async fn connect(
         activation: u64,
         mode: MempoolStreamMode,
-    ) -> ObservationResult {
-        let (mut socket, _) =
-            connect_async(MEMPOOL_SPACE_WS).await?;
+    ) -> ObservationResult<Self> {
+        let (mut socket, _) = connect_async(MEMPOOL_SPACE_WS).await?;
 
         let subscription = match mode {
             MempoolStreamMode::TransactionIds => {
@@ -136,9 +116,7 @@ impl MempoolSpaceStream {
         Ok(Self {
             socket,
             client: reqwest::Client::new(),
-            source: BitcoinObservationSource::mempool_space(
-                activation,
-            ),
+            source: BitcoinObservationSource::mempool_space(activation),
             mode,
             pending: VecDeque::new(),
             skipped: 0,
@@ -160,10 +138,9 @@ impl MempoolSpaceStream {
         self.skipped
     }
 
-    /// Returns the next decoded transaction from the WebSocket feed.
     pub async fn next_observation(
         &mut self,
-    ) -> ObservationResult {
+    ) -> ObservationResult<BitcoinObservation> {
         loop {
             if let Some(observation) = self.pending.pop_front() {
                 return Ok(observation);
@@ -173,30 +150,20 @@ impl MempoolSpaceStream {
         }
     }
 
-    /// Passes the next transaction through settlement construction
-    /// and PSBT preparation.
-    pub async fn stream(
+    pub async fn stream<R: PrevoutResolver>(
         &mut self,
         substrate: &str,
         pipeline: &mut BitcoinObservationPipeline,
         resolver: &R,
-    ) -> ObservationResult {
+    ) -> ObservationResult<PipelineOutcome> {
         let observation = self.next_observation().await?;
 
-        let BitcoinObservation::Transaction(transaction) =
-            observation;
+        let BitcoinObservation::Transaction(transaction) = observation;
 
-        let observed = ObservedBitcoinTransaction::from_transaction(
-            transaction,
-            self.source,
-        );
+        let observed =
+            ObservedBitcoinTransaction::from_transaction(transaction, self.source);
 
-        Ok(refresh(
-            pipeline,
-            substrate,
-            observed,
-            resolver,
-        ))
+        Ok(refresh(pipeline, substrate, observed, resolver))
     }
 
     async fn fill(&mut self) -> ObservationResult<()> {
@@ -207,16 +174,10 @@ impl MempoolSpaceStream {
             .ok_or("Mempool.space WebSocket closed")??;
 
         let value: Value = match message {
-            Message::Text(text) => {
-                serde_json::from_str(text.as_ref())?
-            }
-            Message::Binary(bytes) => {
-                serde_json::from_slice(&bytes)?
-            }
+            Message::Text(text) => serde_json::from_str(text.as_ref())?,
+            Message::Binary(bytes) => serde_json::from_slice(&bytes)?,
             Message::Close(_) => {
-                return Err(
-                    "Mempool.space WebSocket closed".into()
-                );
+                return Err("Mempool.space WebSocket closed".into());
             }
             Message::Ping(_) | Message::Pong(_) | Message::Frame(_) => {
                 return Ok(());
@@ -226,37 +187,27 @@ impl MempoolSpaceStream {
         self.decode(&value).await
     }
 
-    async fn decode(
-        &mut self,
-        value: &Value,
-    ) -> ObservationResult<()> {
-        let mut ids = Vec::::new();
-        let mut seen = HashSet::::new();
+    async fn decode(&mut self, value: &Value) -> ObservationResult<()> {
+        let mut ids = Vec::<String>::new();
+        let mut seen = HashSet::<String>::new();
 
-        if let Some(entries) =
-            added(value, "mempool-transactions")
-        {
+        if let Some(entries) = added(value, "mempool-transactions") {
             for entry in entries {
                 let txid = entry
                     .get("txid")
                     .and_then(Value::as_str)
                     .map(str::to_owned);
 
-                if let Some(hex_tx) =
-                    entry.get("hex").and_then(Value::as_str)
-                {
+                if let Some(hex_tx) = entry.get("hex").and_then(Value::as_str) {
                     match decode_hex_transaction(hex_tx) {
                         Ok(transaction) => {
                             self.pending.push_back(
-                                BitcoinObservation::Transaction(
-                                    transaction,
-                                ),
+                                BitcoinObservation::Transaction(transaction),
                             );
                             continue;
                         }
                         Err(_) => {
-                            self.skipped =
-                                self.skipped.saturating_add(1);
+                            self.skipped = self.skipped.saturating_add(1);
                         }
                     }
                 }
@@ -269,9 +220,7 @@ impl MempoolSpaceStream {
             }
         }
 
-        if let Some(entries) =
-            added(value, "mempool-txids")
-        {
+        if let Some(entries) = added(value, "mempool-txids") {
             for txid in entries.iter().filter_map(Value::as_str) {
                 if seen.insert(txid.to_owned()) {
                     ids.push(txid.to_owned());
@@ -279,9 +228,7 @@ impl MempoolSpaceStream {
             }
         }
 
-        if let Some(txid) =
-            value.get("txid").and_then(Value::as_str)
-        {
+        if let Some(txid) = value.get("txid").and_then(Value::as_str) {
             if seen.insert(txid.to_owned()) {
                 ids.push(txid.to_owned());
             }
@@ -291,13 +238,12 @@ impl MempoolSpaceStream {
             let txid = match Txid::from_str(&txid) {
                 Ok(txid) => txid,
                 Err(_) => {
-                    self.skipped =
-                        self.skipped.saturating_add(1);
+                    self.skipped = self.skipped.saturating_add(1);
                     continue;
                 }
             };
 
-            match fetch_decode::(
+            match fetch_decode(
                 &self.client,
                 format!("{MEMPOOL_SPACE_API}/tx/{txid}/raw"),
             )
@@ -305,14 +251,11 @@ impl MempoolSpaceStream {
             {
                 Ok(transaction) => {
                     self.pending.push_back(
-                        BitcoinObservation::Transaction(
-                            transaction,
-                        ),
+                        BitcoinObservation::Transaction(transaction),
                     );
                 }
                 Err(_) => {
-                    self.skipped =
-                        self.skipped.saturating_add(1);
+                    self.skipped = self.skipped.saturating_add(1);
                 }
             }
         }
@@ -322,28 +265,22 @@ impl MempoolSpaceStream {
 }
 
 #[inline(always)]
-fn added<'a>(
-    value: &'a Value,
-    key: &str,
-) -> Option<&'a Vec> {
+fn added<'a>(value: &'a Value, key: &str) -> Option<&'a Vec<Value>> {
     value.get(key)?.get("added")?.as_array()
 }
 
 #[inline(always)]
 fn decode_hex_transaction(
     hex_tx: &str,
-) -> ObservationResult {
+) -> ObservationResult<bitcoin::Transaction> {
     let raw = hex::decode(hex_tx)?;
-
-    Ok(bitcoin::consensus::deserialize::(
-        &raw,
-    )?)
+    Ok(bitcoin::consensus::deserialize(&raw)?)
 }
 
 async fn fetch_decode(
     client: &reqwest::Client,
     url: String,
-) -> ObservationResult {
+) -> ObservationResult<bitcoin::Transaction> {
     let raw = client
         .get(url)
         .send()
@@ -352,11 +289,11 @@ async fn fetch_decode(
         .bytes()
         .await?;
 
-    Ok(bitcoin::consensus::deserialize::(&raw)?)
+    Ok(bitcoin::consensus::deserialize(&raw)?)
 }
 
 #[inline(always)]
-pub fn refresh(
+pub fn refresh<R: PrevoutResolver>(
     pipeline: &mut BitcoinObservationPipeline,
     substrate: &str,
     observed: ObservedBitcoinTransaction,
@@ -384,13 +321,12 @@ pub fn refresh(
         )));
     }
 
-    let budget = load_budget(substrate, activation, &network)
-        .map_err(|error| {
-            SettlementError::Backend(format!(
-                "budget load failed: substrate={} activation={} network={}: {}",
-                substrate, activation, network, error,
-            ))
-        })?;
+    let budget = load_budget(substrate, activation, &network).map_err(|error| {
+        SettlementError::Backend(format!(
+            "budget load failed: substrate={} activation={} network={}: {}",
+            substrate, activation, network, error,
+        ))
+    })?;
 
     let mut persisted_submission = 0u64;
     let mut sequence_ended = false;
@@ -405,13 +341,12 @@ pub fn refresh(
                     )));
                 }
 
-                let packets = decode_wirepackets(&bytes)
-                    .map_err(|error| {
-                        SettlementError::Backend(format!(
-                            "persisted wirepacket decode failed: submission={}: {}",
-                            number, error,
-                        ))
-                    })?;
+                let packets = decode_wirepackets(&bytes).map_err(|error| {
+                    SettlementError::Backend(format!(
+                        "persisted wirepacket decode failed: submission={}: {}",
+                        number, error,
+                    ))
+                })?;
 
                 let commitment = packets
                     .first()
@@ -423,7 +358,10 @@ pub fn refresh(
                         ))
                     })?;
 
-                if packets.iter().any(|packet| packet.commitment != commitment) {
+                if packets
+                    .iter()
+                    .any(|packet| packet.commitment != commitment)
+                {
                     return Err(SettlementError::Backend(format!(
                         "mixed commitments in submission: {}",
                         number,
@@ -463,11 +401,9 @@ pub fn refresh(
         .submissions
         .insert(substrate.to_owned(), persisted_submission);
 
-    let submission = persisted_submission
-        .checked_add(1)
-        .ok_or_else(|| {
-            SettlementError::Backend("submission sequence overflow".into())
-        })?;
+    let submission = persisted_submission.checked_add(1).ok_or_else(|| {
+        SettlementError::Backend("submission sequence overflow".into())
+    })?;
 
     if submission > budget.max_events {
         return Err(SettlementError::Backend(format!(
@@ -499,6 +435,30 @@ pub fn refresh(
             "submission mismatch: expected={} actual={}",
             submission, actual_submission,
         )));
+    }
+
+    if materialized_payload.inputs.len() != finalized.transaction.input.len() {
+        return Err(SettlementError::Backend(format!(
+            "materialized input count mismatch: payload={} transaction={}",
+            materialized_payload.inputs.len(),
+            finalized.transaction.input.len(),
+        )));
+    }
+
+    for (input_index, (payload_input, transaction_input)) in materialized_payload
+        .inputs
+        .iter()
+        .zip(finalized.transaction.input.iter())
+        .enumerate()
+    {
+        if payload_input.previous_output != transaction_input.previous_output {
+            return Err(SettlementError::Backend(format!(
+                "materialized input outpoint mismatch: input={} payload={} transaction={}",
+                input_index,
+                payload_input.previous_output,
+                transaction_input.previous_output,
+            )));
+        }
     }
 
     let generated_packets = finalized.wire_packets(commitment);
@@ -576,15 +536,14 @@ pub fn refresh(
     let private_key = qtm.coordinate;
     let heritage = qtm_open_manifold_until(substrate, activation);
 
-    // Parent provenance is the heritage activity state activation.
-    // outpoint.vout is only the output index inside the parent transaction.
-    // All inputs in this settlement share the same parent activity state.
     let parent_submission = heritage.state.activation;
 
     let mut resolved_prevouts =
         Vec::with_capacity(finalized.transaction.input.len());
 
-    for (input_index, payload_input) in materialized_payload.inputs.iter().enumerate() {
+    for (input_index, payload_input) in
+        materialized_payload.inputs.iter().enumerate()
+    {
         let outpoint = &payload_input.previous_output;
 
         let resolved = resolver
@@ -610,13 +569,15 @@ pub fn refresh(
         resolved_prevouts.push(resolved);
     }
 
-    let mut psbt = BitcoinPsbt::from_settlement(finalized, resolved_prevouts)
-        .map_err(|error| {
-            SettlementError::Backend(format!(
-                "Bitcoin PSBT preparation failed: {}",
-                error,
-            ))
-        })?;
+    let mut psbt =
+        BitcoinPsbt::from_settlement(finalized, resolved_prevouts).map_err(
+            |error| {
+                SettlementError::Backend(format!(
+                    "Bitcoin PSBT preparation failed: {}",
+                    error,
+                ))
+            },
+        )?;
 
     println!(
         "bitcoin_psbt=prepared submission={} unsigned_txid={}",
@@ -682,11 +643,10 @@ pub fn refresh(
     Ok(Some((psbt, retained_mass, commitment, depth)))
 }
 
-/// Decode the persisted QTMGSP02 length-prefixed packet sequence.
 #[inline(always)]
 fn decode_wirepackets(
     bytes: &[u8],
-) -> Result, SettlementError> {
+) -> Result<Vec<WirePacket>, SettlementError> {
     if bytes.is_empty() {
         return Err(SettlementError::Backend(
             "persisted wire-packet file is empty".into(),
@@ -721,9 +681,7 @@ fn decode_wirepackets(
 
         offset = header_end;
 
-        if !(WirePacket::MIN_SIZE..=WirePacket::MAX_SIZE)
-            .contains(&frame_len)
-        {
+        if !(WirePacket::MIN_SIZE..=WirePacket::MAX_SIZE).contains(&frame_len) {
             return Err(SettlementError::Backend(format!(
                 "invalid wire-packet frame length={}",
                 frame_len,
@@ -742,14 +700,14 @@ fn decode_wirepackets(
             ));
         }
 
-        let packet = WirePacket::deserialize(
-            &bytes[offset..frame_end],
-        )
-        .map_err(|error| {
-            SettlementError::Backend(format!(
-                "wire-packet deserialization failed: {error}"
-            ))
-        })?;
+        let packet =
+            WirePacket::deserialize(&bytes[offset..frame_end]).map_err(
+                |error| {
+                    SettlementError::Backend(format!(
+                        "wire-packet deserialization failed: {error}"
+                    ))
+                },
+            )?;
 
         packets.push(packet);
         offset = frame_end;
