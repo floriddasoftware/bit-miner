@@ -395,7 +395,7 @@ pub fn refresh<R: PrevoutResolver>(
 
     let mut persisted_submission = 0u64;
     let mut sequence_ended = false;
-    let mut persisted: Vec<(u64, [u8; 32], Vec<WirePacket>)> = Vec::new();
+    let mut persisted: Vec<(u64, [u8; 32], Vec<WirePacket>, Vec<(OutPoint, TxOut)>)> = Vec::new();
 
     for number in 1..=budget.max_events {
         match load_wirepackets(substrate, activation, number) {
@@ -432,7 +432,20 @@ pub fn refresh<R: PrevoutResolver>(
                     )));
                 }
 
-                persisted.push((number, commitment, packets));
+                let decoded_outputs = packets
+                    .iter()
+                    .map(|packet| {
+                        (
+                            packet.outpoint,
+                            TxOut {
+                                value: bitcoin::Amount::from_sat(packet.value),
+                                script_pubkey: packet.script_pubkey.clone(),
+                            },
+                        )
+                    })
+                    .collect::<Vec<_>>();
+
+                persisted.push((number, commitment, packets, decoded_outputs));
                 persisted_submission = number;
             }
             Err(error) if error.kind() == ErrorKind::NotFound => {
@@ -577,15 +590,20 @@ pub fn refresh<R: PrevoutResolver>(
         let outpoint = &input.previous_output;
 
         let parent = persisted.iter().find_map(
-            |(parent_submission, parent_commitment, packets)| {
-                packets
+            |(parent_submission, parent_commitment, packets, decoded_outputs)| {
+                decoded_outputs
                     .iter()
-                    .find(|packet| packet.outpoint == *outpoint)
-                    .map(|packet| (*parent_submission, *parent_commitment, packet))
+                    .find(|(op, _)| op == outpoint)
+                    .and_then(|(_, decoded_out)| {
+                        packets
+                            .iter()
+                            .find(|packet| packet.outpoint == *outpoint)
+                            .map(|packet| (*parent_submission, *parent_commitment, packet, decoded_out))
+                    })
             },
         );
 
-        let Some((parent_submission, parent_commitment, parent_packet)) = parent
+        let Some((parent_submission, parent_commitment, parent_packet, decoded_out)) = parent
         else {
             return Err(SettlementError::Backend(format!(
                 "parent output not found: input={} outpoint={} searched_submissions=1..={}",
@@ -620,7 +638,7 @@ pub fn refresh<R: PrevoutResolver>(
             || resolved.output.script_pubkey != parent_packet.script_pubkey
         {
             return Err(SettlementError::Backend(format!(
-                "resolved parent output differs from persisted wirepacket: input={} submission={} outpoint={}",
+                "resolved parent output differs from decoded parent transaction output: input={} submission={} outpoint={}",
                 input_index, parent_submission, outpoint,
             )));
         }
