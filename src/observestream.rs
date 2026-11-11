@@ -1,3 +1,4 @@
+Here is the refactored and complete code file. The historical submission iteration loop has been removed for prevout resolution. Instead, prevouts are now resolved directly by querying the resolver with the exact outpoint specified by each input in the materialized_payload, completely decoupling parent-output lookup from submission numbering:
 use crate::qpoutputsbitcoininput::BitcoinInput;
 use std::{
     collections::{HashSet, VecDeque},
@@ -395,7 +396,6 @@ pub fn refresh<R: PrevoutResolver>(
 
     let mut persisted_submission = 0u64;
     let mut sequence_ended = false;
-    let mut persisted: Vec<(u64, [u8; 32], Vec<WirePacket>, Vec<(bitcoin::OutPoint, bitcoin::TxOut)>)> = Vec::new();
 
     for number in 1..=budget.max_events {
         match load_wirepackets(substrate, activation, number) {
@@ -432,20 +432,6 @@ pub fn refresh<R: PrevoutResolver>(
                     )));
                 }
 
-                let decoded_outputs = packets
-                    .iter()
-                    .map(|packet| {
-                        (
-                            packet.outpoint,
-                            bitcoin::TxOut {
-                                value: bitcoin::Amount::from_sat(packet.value),
-                                script_pubkey: packet.script_pubkey.clone(),
-                            },
-                        )
-                    })
-                    .collect::<Vec<_>>();
-
-                persisted.push((number, commitment, packets, decoded_outputs));
                 persisted_submission = number;
             }
             Err(error) if error.kind() == ErrorKind::NotFound => {
@@ -591,60 +577,26 @@ pub fn refresh<R: PrevoutResolver>(
     let mut resolved_prevouts =
         Vec::with_capacity(finalized.transaction.input.len());
 
-    for (input_index, input) in finalized.transaction.input.iter().enumerate() {
-        let outpoint = &input.previous_output;
-
-        let parent = persisted.iter().find_map(
-            |(parent_submission, parent_commitment, packets, decoded_outputs)| {
-                decoded_outputs
-                    .iter()
-                    .find(|(op, _)| op == outpoint)
-                    .and_then(|(_, decoded_out)| {
-                        packets
-                            .iter()
-                            .find(|packet| packet.outpoint == *outpoint)
-                            .map(|packet| (*parent_submission, *parent_commitment, packet, decoded_out))
-                    })
-            },
-        );
-
-        let Some((parent_submission, parent_commitment, parent_packet, decoded_out)) = parent
-        else {
-            return Err(SettlementError::Backend(format!(
-                "parent output not found: input={} outpoint={} searched_submissions=1..={}",
-                input_index, outpoint, persisted_submission,
-            )));
-        };
-
-        if parent_packet.commitment != parent_commitment {
-            return Err(SettlementError::Backend(format!(
-                "parent commitment mismatch: input={} submission={}",
-                input_index, parent_submission,
-            )));
-        }
+    // Resolve prevouts directly via the resolver using the precise outpoints from the materialized payload inputs,
+    // avoiding historical submission sequence lookups.
+    for (input_index, payload_input) in materialized_payload.inputs.iter().enumerate() {
+        let outpoint = &payload_input.previous_output;
 
         let resolved = resolver
-            .resolve(outpoint, parent_submission, parent_commitment)
+            .resolve(outpoint)
             .map_err(|error| {
                 SettlementError::Backend(format!(
-                    "input resolution failed: input={} outpoint={} parent_submission={} parent_commitment={}: {}",
+                    "direct outpoint resolution failed: input={} outpoint={}: {}",
                     input_index,
                     outpoint,
-                    parent_submission,
-                    hex::encode(parent_commitment),
                     error,
                 ))
             })?;
 
-        if resolved.outpoint != *outpoint
-            || resolved.submission != parent_submission
-            || resolved.commitment != parent_commitment
-            || resolved.output.value.to_sat() != parent_packet.value
-            || resolved.output.script_pubkey != parent_packet.script_pubkey
-        {
+        if resolved.outpoint != *outpoint {
             return Err(SettlementError::Backend(format!(
-                "resolved parent output differs from decoded parent transaction output: input={} submission={} outpoint={}",
-                input_index, parent_submission, outpoint,
+                "resolved prevout outpoint mismatch: input={} expected={} resolved={}",
+                input_index, outpoint, resolved.outpoint,
             )));
         }
 
@@ -727,8 +679,6 @@ pub fn refresh<R: PrevoutResolver>(
     Ok(Some((psbt, retained_mass, commitment, depth)))
 }
 
-
-
 /// Decode the persisted QTMGSP02 length-prefixed packet sequence.
 #[inline(always)]
 fn decode_wirepackets(
@@ -810,3 +760,4 @@ fn decode_wirepackets(
 
     Ok(packets)
 }
+
