@@ -514,7 +514,7 @@ pub fn refresh<R: PrevoutResolver>(
 }
 
 
-fn decode_wirepackets(bytes: &[u8]) -> Result<Vec<WirePacket>, SettlementError> {
+pub fn decode_wirepackets(bytes: &[u8]) -> Result<Vec<WirePacket>, SettlementError> {
     let mut rest = bytes;
     let mut packets = Vec::new();
 
