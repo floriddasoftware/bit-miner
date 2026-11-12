@@ -467,7 +467,7 @@ else {
         pipeline.miner().broadcaster.publish(packet);
     }
 
-    Ok(Some((finalized, psbt, retained_mass, commitment, depth)))
+    Ok(Some((finalized, psbt, retained_mass, commitment)))
 }
 
 fn decode_wirepackets(bytes: &[u8]) -> Result<Vec<WirePacket>, SettlementError> {
