@@ -1,11 +1,12 @@
 use std::{
-    collections::{HashSet, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     error::Error,
     io::ErrorKind,
     str::FromStr,
 };
 
-use bitcoin::Txid;
+use bitcoin::{OutPoint, Txid};
+
 use futures_util::{SinkExt, StreamExt};
 use qp_hd::commands::{load_budget, load_wirepackets, persist_wirepackets};
 use qp_hd::pathsregistry::CoinType;
@@ -25,6 +26,7 @@ use crate::{
 
 pub type Blockchain = CoinType;
 pub type ObservationResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
+type ParentIndex = HashMap<OutPoint, Vec<(u64, WirePacket)>>;
 
 pub type PipelineOutcome = Result<
     Option<(FinalizedSettlement, BitcoinPsbt, u128, [u8; 32])>,
