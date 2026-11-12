@@ -263,8 +263,9 @@ fn fail(message: impl Into<String>) -> SettlementError {
     SettlementError::Backend(message.into())
 }
 
-/// Validates the clip and budget, processes the observation, persists and
-/// verifies wire packets, resolves parent outpoints, and builds an unsigned PSBT.
+/// Validates the clip and budget, processes the observation (delegated to
+/// pipeline.process -> SettlementEngine), persists and verifies wire packets,
+/// resolves parent outpoints from persisted packets, and builds an unsigned PSBT.
 /// The wallet client owns signing and broadcast.
 pub fn refresh<R: PrevoutResolver>(
     pipeline: &mut BitcoinObservationPipeline,
@@ -295,6 +296,7 @@ pub fn refresh<R: PrevoutResolver>(
 
     let mut persisted = 0u64;
     let mut ended = false;
+    let mut parents = ParentIndex::new();
 
     for number in 1..=budget.max_events {
         match load_wirepackets(substrate, activation, number) {
@@ -312,6 +314,13 @@ pub fn refresh<R: PrevoutResolver>(
                     return Err(fail(format!(
                         "mixed commitments in submission: {number}"
                     )));
+                }
+
+                for packet in packets {
+                    parents
+                        .entry(packet_outpoint(&packet))
+                        .or_default()
+                        .push((number, packet));
                 }
 
                 persisted = number;
@@ -378,6 +387,7 @@ pub fn refresh<R: PrevoutResolver>(
         ));
     }
 
+    // The current commitment applies only to the current submission's packets.
     let generated = finalized.wire_packets(commitment);
 
     if generated.is_empty() {
@@ -438,30 +448,40 @@ pub fn refresh<R: PrevoutResolver>(
         persisted_bytes.len(),
     );
 
-    let receipt = finalized
-        .receipt
-        .as_ref()
-        .ok_or_else(|| fail("finalized settlement has no receipt"))?;
-
-    let previous_submission = receipt.event.heritage.state.activations();
-    let previous_commitment = receipt.event.qtm.commitment;
+    // Parent identity comes from the persisted parent packet itself: its own
+    // submission number and its own commitment, never the current event's.
     let mut prevouts = Vec::with_capacity(tx.input.len());
 
     for (i, input) in tx.input.iter().enumerate() {
         let outpoint = &input.previous_output;
 
+        let (parent_submission, parent_packet) =
+            match parents.get(outpoint).map(Vec::as_slice) {
+                Some([(submission, packet)]) => (*submission, packet),
+                Some(_) => {
+                    return Err(fail(format!(
+                        "ambiguous parent packets: input={i} outpoint={outpoint}"
+                    )));
+                }
+                None => {
+                    return Err(fail(format!(
+                        "missing parent packet: input={i} outpoint={outpoint}"
+                    )));
+                }
+            };
+
         let resolved = resolver
-            .resolve(outpoint, previous_submission, previous_commitment)
+            .resolve_packet(parent_packet, parent_submission)
             .map_err(|e| {
                 fail(format!(
-                    "outpoint resolution failed: input={i} outpoint={outpoint} previous_submission={previous_submission} commitment={}: {e}",
-                    hex::encode(previous_commitment),
+                    "outpoint resolution failed: input={i} outpoint={outpoint} parent_submission={parent_submission} parent_commitment={}: {e}",
+                    hex::encode(parent_packet.commitment),
                 ))
             })?;
 
         if resolved.outpoint != *outpoint
-            || resolved.submission != previous_submission
-            || resolved.commitment != previous_commitment
+            || resolved.submission != parent_submission
+            || resolved.commitment != parent_packet.commitment
         {
             return Err(fail(format!(
                 "resolved prevout mismatch: input={i} outpoint={outpoint}"
@@ -485,6 +505,7 @@ pub fn refresh<R: PrevoutResolver>(
 
     Ok(Some((finalized, psbt, retained_mass, commitment)))
 }
+
 
 fn decode_wirepackets(bytes: &[u8]) -> Result<Vec<WirePacket>, SettlementError> {
     let mut rest = bytes;
