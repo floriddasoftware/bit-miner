@@ -1,7 +1,10 @@
+
 use qtm_graph::graph::frame::{Depth, Direction};
 use quantom_value::{QuantPerm, Retain};
+
 use crate::bitcoinoutputqpinput::BitcoinOutput;
 use crate::qpoutputsbitcoininput::BitcoinInput;
+
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum PayloadType {
@@ -10,14 +13,17 @@ pub enum PayloadType {
     Wallet = 2,
     Mempool = 3,
 }
+
 impl Default for PayloadType {
     #[inline(always)]
     fn default() -> Self {
         Self::Payload
     }
 }
+
 pub trait PayloadComponent: std::fmt::Debug + Send + Sync {
     fn retained(&self, manifold: &QuantPerm) -> Retain;
+
     #[inline(always)]
     fn deep(
         &self,
@@ -29,6 +35,7 @@ pub trait PayloadComponent: std::fmt::Debug + Send + Sync {
         depth.insert(identifier, position, self.retained(manifold));
         Direction::realize_depth(manifold, &depth)
     }
+
     #[inline(always)]
     fn mass(
         &self,
@@ -39,14 +46,17 @@ pub trait PayloadComponent: std::fmt::Debug + Send + Sync {
         self.deep(manifold, identifier, position).mass
     }
 }
+
 #[derive(Clone, Debug, Default)]
 pub struct BitcoinWallet {
     pub addresses: Vec<String>,
 }
+
 #[derive(Clone, Debug, Default)]
 pub struct BitcoinMempool {
     pub transaction_ids: Vec<bitcoin::Txid>,
 }
+
 #[repr(C)]
 #[derive(Clone, Debug, Default)]
 pub struct BitcoinPayload {
@@ -55,6 +65,7 @@ pub struct BitcoinPayload {
     pub outputs: Vec<BitcoinOutput>,
     pub payload_type: PayloadType,
 }
+
 impl BitcoinPayload {
     #[inline(always)]
     pub fn new(
@@ -68,6 +79,7 @@ impl BitcoinPayload {
             payload_type: PayloadType::Payload,
         }
     }
+
     #[inline(always)]
     pub fn from_address(address: impl Into<String>) -> Self {
         Self {
@@ -77,6 +89,7 @@ impl BitcoinPayload {
             payload_type: PayloadType::Address,
         }
     }
+
     #[inline(always)]
     pub fn from_wallet(wallet: &BitcoinWallet) -> Self {
         Self {
@@ -86,6 +99,7 @@ impl BitcoinPayload {
             payload_type: PayloadType::Wallet,
         }
     }
+
     #[inline(always)]
     pub fn from_mempool(_mempool: &BitcoinMempool) -> Self {
         Self {
@@ -95,32 +109,39 @@ impl BitcoinPayload {
             payload_type: PayloadType::Mempool,
         }
     }
+
     #[inline(always)]
     pub fn input_count(&self) -> usize {
         self.inputs.len()
     }
+
     #[inline(always)]
     pub fn output_count(&self) -> usize {
         self.outputs.len()
     }
+
     #[inline(always)]
     pub fn address_count(&self) -> usize {
         self.addresses.len()
     }
+
     #[inline]
     pub fn output_value_sat(&self) -> Option<u64> {
         self.outputs
             .iter()
             .try_fold(0u64, |sum, output| sum.checked_add(output.value))
     }
+
     #[inline(always)]
     pub fn output_at(&self, index: usize) -> Option<&BitcoinOutput> {
         self.outputs.get(index)
     }
+
     #[inline(always)]
     pub fn input_at(&self, index: usize) -> Option<&BitcoinInput> {
         self.inputs.get(index)
     }
+
     #[inline(always)]
     pub fn retained(&self, manifold: &QuantPerm) -> Retain {
         let input_mass = self
@@ -132,7 +153,9 @@ impl BitcoinPayload {
                     input.deep(manifold, "input", position).mass,
                 )
             });
+
         let output_offset = self.inputs.len();
+
         let output_mass = self
             .outputs
             .iter()
@@ -144,10 +167,12 @@ impl BitcoinPayload {
                         .mass,
                 )
             });
+
         let address_offset = self
             .inputs
             .len()
             .saturating_add(self.outputs.len());
+
         let address_mass = self
             .addresses
             .iter()
@@ -159,14 +184,18 @@ impl BitcoinPayload {
                     .fold(0u128, |sum, byte| {
                         sum.saturating_add(u128::from(*byte))
                     });
+
                 let retained =
                     manifold.retain(byte_mass, manifold.dimension());
+
                 let mut depth = Depth::new("qp/payload");
                 depth.insert("address", address_offset + position, retained);
+
                 mass.saturating_add(
                     Direction::realize_depth(manifold, &depth).mass,
                 )
             });
+
         manifold.retain(
             input_mass
                 .saturating_add(output_mass)
@@ -174,12 +203,20 @@ impl BitcoinPayload {
             manifold.dimension(),
         )
     }
+
     #[inline(always)]
     pub fn replay_mass(&self, manifold: &QuantPerm) -> u128 {
         self.retained(manifold).mass
     }
+
     #[inline(always)]
-    pub fn fee_mass(&self, manifold: &QuantPerm) -> u128 {
-        self.replay_mass(manifold) / 100
+    pub fn fee_mass(
+        &self,
+        manifold: &QuantPerm,
+        delta: u128,
+    ) -> u128 {
+        self.replay_mass(manifold)
+            .saturating_mul(delta)
+            / 100
     }
 }
