@@ -9,7 +9,6 @@ use bitcoin::Txid;
 use futures_util::{SinkExt, StreamExt};
 use qp_hd::commands::{load_budget, load_wirepackets, persist_wirepackets};
 use qp_hd::pathsregistry::CoinType;
-use qtm_graph::graph::frame::Depth;
 use serde_json::Value;
 use tokio::net::TcpStream;
 use tokio_tungstenite::{
@@ -31,7 +30,7 @@ pub type ObservationResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 /// Unsigned coordination result: canonical finalized settlement, unsigned PSBT
 /// for the wallet to sign, retained mass, QTM commitment, depth.
 pub type PipelineOutcome = Result<
-    Option<(FinalizedSettlement, BitcoinPsbt, u128, [u8; 32], Depth)>,
+    Option<(FinalizedSettlement, BitcoinPsbt, u128, [u8; 32])>,
     SettlementError,
 >;
 
@@ -332,11 +331,11 @@ pub fn refresh<R: PrevoutResolver>(
             ))
         })?;
 
-    let Some((finalized, payload, retained_mass, commitment, depth)) =
-        pipeline.process(substrate, observed)?
-    else {
-        return Ok(None);
-    };
+    let Some((finalized, payload, retained_mass, commitment)) =
+    pipeline.process(substrate, observed)?
+else {
+    return Ok(None);
+};
 
     let actual = pipeline
         .miner
