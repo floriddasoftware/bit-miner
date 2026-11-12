@@ -71,11 +71,7 @@ impl fmt::Display for SigningError {
                 index,
             ),
             Self::InvalidPrivateKey(error) => {
-                write!(
-                    f,
-                    "invalid Bitcoin private key: {}",
-                    error,
-                )
+                write!(f, "invalid Bitcoin private key: {}", error)
             }
             Self::PreviousOutputScriptMismatch { index } => write!(
                 f,
@@ -83,18 +79,10 @@ impl fmt::Display for SigningError {
                 index,
             ),
             Self::Sighash(error) => {
-                write!(
-                    f,
-                    "Bitcoin signature hash failed: {}",
-                    error,
-                )
+                write!(f, "Bitcoin signature hash failed: {}", error)
             }
             Self::InvalidMessage(error) => {
-                write!(
-                    f,
-                    "invalid Bitcoin signing message: {}",
-                    error,
-                )
+                write!(f, "invalid Bitcoin signing message: {}", error)
             }
         }
     }
@@ -154,9 +142,8 @@ impl BitcoinInput {
     }
 
     #[inline(always)]
-    fn deep_with_miner(
+    fn deep(
         &self,
-        miner: &Miner,
         manifold: &QuantPerm,
         position: usize,
     ) -> Retain {
@@ -189,14 +176,10 @@ impl BitcoinInput {
             ),
         );
 
-        miner.deep(
-            manifold,
-            &depth,
-        )
+        Miner::deep(manifold, &depth)
     }
 
     pub fn new(
-        miner: &Miner,
         manifold: &QuantPerm,
         previous_output: OutPoint,
         script_sig: ScriptBuf,
@@ -210,11 +193,7 @@ impl BitcoinInput {
             sequence,
         };
 
-        let retained = input.deep_with_miner(
-            miner,
-            manifold,
-            0,
-        );
+        let retained = input.deep(manifold, 0);
 
         (retained, input)
     }
@@ -222,7 +201,6 @@ impl BitcoinInput {
     #[inline]
     pub fn sign(
         &mut self,
-        miner: &Miner,
         manifold: &QuantPerm,
         private_key: [u8; 32],
         transaction: &bitcoin::Transaction,
@@ -263,16 +241,11 @@ impl BitcoinInput {
                 &secret_key,
             );
 
-        let public_key = PublicKey::new(
-            secp_public_key,
-        );
-
+        let public_key = PublicKey::new(secp_public_key);
         let public_key_bytes = public_key.to_bytes();
 
         let pubkey_hash =
-            bitcoin::WPubkeyHash::hash(
-                &public_key_bytes,
-            );
+            bitcoin::WPubkeyHash::hash(&public_key_bytes);
 
         let expected_script =
             ScriptBuf::new_p2wpkh(&pubkey_hash);
@@ -293,44 +266,31 @@ impl BitcoinInput {
                 EcdsaSighashType::All,
             )
             .map_err(|error| {
-                SigningError::Sighash(
-                    error.to_string(),
-                )
+                SigningError::Sighash(error.to_string())
             })?;
 
         let message =
-            Message::from_slice(
-                &sighash.to_byte_array(),
-            )
-            .map_err(|error| {
-                SigningError::InvalidMessage(
-                    error.to_string(),
-                )
-            })?;
+            Message::from_slice(&sighash.to_byte_array())
+                .map_err(|error| {
+                    SigningError::InvalidMessage(
+                        error.to_string(),
+                    )
+                })?;
 
         let signature =
-            secp.sign_ecdsa(
-                &message,
-                &secret_key,
-            );
+            secp.sign_ecdsa(&message, &secret_key);
 
         let mut signature_bytes =
             signature.serialize_der().to_vec();
 
-        signature_bytes.push(
-            EcdsaSighashType::All as u8,
-        );
+        signature_bytes.push(EcdsaSighashType::All as u8);
 
         self.witness = Witness::from_slice(&[
             signature_bytes.as_slice(),
             public_key_bytes.as_slice(),
         ]);
 
-        Ok(self.deep_with_miner(
-            miner,
-            manifold,
-            input_index,
-        ))
+        Ok(self.deep(manifold, input_index))
     }
 }
 
