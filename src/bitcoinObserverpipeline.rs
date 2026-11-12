@@ -1,13 +1,13 @@
-
 use qp_hd::{
-    commands::{
-        load_event_at_activation,
-        qtm_open_manifold_until,
-        PersistedEvent,
-    },
-    qp44::PQ44Event,
+    commands::qtm_open_manifold_until,
+    protocol_id::LockedStructure,
+    protocolvalue::Qtm,
+    qp44::QP44Event,
 };
-use qtm_graph::graph::frame::Depth;
+use qtm_graph::graph::{
+    frame::{Depth, Direction},
+    scale::Scale,
+};
 use quantom_value::QuantPerm;
 
 use crate::{
@@ -98,6 +98,20 @@ impl BitcoinObservationPipeline {
     }
 
     #[inline(always)]
+    fn duplicate_depth(depth: &Depth) -> Depth {
+        let mut duplicate = Depth::new(depth.path());
+
+        for (position, identifier, retain) in depth.objects() {
+            duplicate.insert(
+                identifier,
+                position,
+                retain.clone(),
+            );
+        }
+
+        duplicate
+    }
+
     pub fn process(
         &mut self,
         substrate: &str,
@@ -127,17 +141,31 @@ impl BitcoinObservationPipeline {
                 ))
             })?;
 
-        let pre_settlement = qtm_open_manifold_until(
-            substrate,
-            self.activation,
-        );
+        if clip_activation != self.activation {
+            return Err(SettlementError::Backend(format!(
+                "miner clip activation mismatch: substrate={} requested={} active={} network={}",
+                substrate,
+                self.activation,
+                clip_activation,
+                self.network,
+            )));
+        }
 
-        let (bitcoin, retained_mass) =
+        let pre_settlement =
+            qtm_open_manifold_until(substrate, self.activation);
+
+        let (bitcoin, retained_mass, depth) =
             self.bitcoin_payload(&observed, &pre_settlement.state)?;
 
-        let depth = self
+        let (heritage, submission_count) = self
             .miner
-            .submit(substrate, clip_activation)
+            .submit(
+                substrate,
+                clip_activation,
+                pre_settlement.state,
+                &depth,
+                None,
+            )
             .map_err(|error| {
                 SettlementError::Backend(format!(
                     "miner submission failed: substrate={} activation={} network={}: {}",
@@ -148,74 +176,65 @@ impl BitcoinObservationPipeline {
                 ))
             })?;
 
-        let submission_count = self
-            .miner
-            .submissions
-            .get(substrate)
-            .copied()
-            .unwrap_or(0);
+        let submission = usize::try_from(submission_count)
+            .map_err(|error| {
+                SettlementError::Backend(format!(
+                    "submission index exceeds supported range: {error}",
+                ))
+            })?;
 
-        let submission = usize::try_from(
-            submission_count.saturating_sub(1),
+        let direction = Miner::direction(
+            heritage,
+            Scale::Global,
+        );
+
+        let qtm = Qtm::commit(
+            &direction.event.heritage.state,
+            direction.event.net_work(),
+        );
+
+        let commitment = qtm.commitment;
+
+        let locked = LockedStructure {
+            dimension: direction.event.dimension(),
+            structural_value: direction.event.structural_value(),
+        };
+
+        let event = QP44Event {
+            heritage: direction.into_heritage(),
+            qtm,
+            depth: Self::duplicate_depth(&depth),
+        };
+
+        let event_receipt = EventReceipt::new(
+            event,
+            SettlementState::Pending,
+            locked,
         )
         .map_err(|error| {
-            SettlementError::Backend(format!(
-                "submission index exceeds supported range: {error}",
-            ))
+            SettlementError::Backend(error.to_string())
         })?;
 
-        match load_event_at_activation(substrate, self.activation) {
-            PersistedEvent::Transit(event) => {
-                let locked = qp_hd::protocol_id::LockedStructure {
-                    dimension: event.heritage.state.dimension(),
-                    structural_value: event.heritage.state.structural_value(),
-                };
+        let materialized = self.advance_materialized(
+            substrate,
+            bitcoin,
+            retained_mass,
+            event_receipt,
+            observed,
+            submission,
+        )?;
 
-                let event_receipt = EventReceipt::new(
-                    event,
-                    SettlementState::Pending,
-                    locked,
-                )
-                .map_err(|error| {
-                    SettlementError::Backend(error.to_string())
-                })?;
-
-                let commitment = event_receipt.event.qtm.commitment;
-
-                let materialized = self.advance_materialized(
-                    substrate,
-                    bitcoin,
-                    retained_mass,
-                    event_receipt,
-                    observed,
-                    submission,
-                )?;
-
-                Ok(materialized.map(
-                    |(finalized, payload, retained_mass)| {
-                        (
-                            ObservationSettlement::Finalized(finalized),
-                            payload,
-                            retained_mass,
-                            commitment,
-                            depth,
-                        )
-                    },
-                ))
-            }
-
-            PersistedEvent::Exile(event) => {
-                let commitment = event.qtm.commitment;
-
-                Ok(Some((
-                    ObservationSettlement::Exile(event),
-                    bitcoin,
+        Ok(materialized.map(
+            |(finalized, payload, retained_mass)| {
+                (
+                    ObservationSettlement::Finalized(finalized),
+                    payload,
                     retained_mass,
                     commitment,
                     depth,
-                )))
-            }
-        }
+                )
+            },
+        ))
     }
 
     #[inline(always)]
@@ -223,7 +242,7 @@ impl BitcoinObservationPipeline {
         &mut self,
         observed: &ObservedBitcoinTransaction,
         manifold: &QuantPerm,
-    ) -> Result<(BitcoinPayload, u128), SettlementError> {
+    ) -> Result<(BitcoinPayload, u128, Depth), SettlementError> {
         self.utxo.collect(observed, manifold)
     }
 
@@ -248,8 +267,8 @@ impl BitcoinObservationPipeline {
             return Ok(None);
         }
 
-        let (finalized, payload) = SettlementEngine::new(substrate)
-            .process(
+        let (finalized, payload) =
+            SettlementEngine::new(substrate).process(
                 event_receipt,
                 bitcoin,
                 observed,
