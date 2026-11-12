@@ -1,6 +1,12 @@
 
+use std::{
+    error::Error,
+    fmt,
+    io,
+};
+
 use bitcoin::Transaction;
-use quantom_value::QuantPerm;
+use quantom_value::{PQ44Event, QuantPerm};
 use qtm_graph::graph::{
     frame::Direction,
     scale::Scale,
@@ -15,13 +21,9 @@ use crate::{
     sharedtypes::SettlementState,
 };
 
-use qp_hd::qp44::{PQ44Event, PQ44Event as _};
-
-use std::{
-    error::Error,
-    fmt,
-    io,
-};
+pub fn balance(event: PQ44Event) -> PQ44Event {
+    event
+}
 
 #[derive(Debug)]
 pub enum SettlementError {
@@ -33,8 +35,8 @@ pub enum SettlementError {
 impl fmt::Display for SettlementError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Backend(msg) => write!(f, "{msg}"),
-            Self::Unsupported(msg) => write!(f, "{msg}"),
+            Self::Backend(message) => write!(f, "{message}"),
+            Self::Unsupported(message) => write!(f, "Unsupported: {message}"),
             Self::Io(error) => write!(f, "{error}"),
         }
     }
