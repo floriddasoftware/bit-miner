@@ -16,7 +16,6 @@ use tokio_tungstenite::{
 };
 
 use crate::{
-    bitcoinpsbt::{BitcoinPsbt, PrevoutResolver},
     broadcast::{FinalizedSettlement, WirePacket},
     observebitcointransaction::ObservedBitcoinTransaction,
     settlement::SettlementError,
