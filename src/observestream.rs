@@ -292,6 +292,7 @@ async fn fetch_decode(
     Ok(bitcoin::consensus::deserialize(&raw)?)
 }
 
+
 #[inline(always)]
 pub fn refresh<R: PrevoutResolver>(
     pipeline: &mut BitcoinObservationPipeline,
@@ -320,6 +321,8 @@ pub fn refresh<R: PrevoutResolver>(
             activation,
         )));
     }
+
+    let observation_source = observed.source.clone();
 
     let budget = load_budget(substrate, activation, &network)
         .map_err(|error| {
@@ -419,7 +422,7 @@ pub fn refresh<R: PrevoutResolver>(
     }
 
     let Some((
-        finalized,
+        settlement,
         materialized_payload,
         retained_mass,
         commitment,
@@ -442,6 +445,239 @@ pub fn refresh<R: PrevoutResolver>(
             submission, actual_submission,
         )));
     }
+
+    let (
+        finalized,
+        materialized_payload,
+        previous_submission,
+        previous_commitment,
+        wire_packets,
+    ) = match settlement {
+        ObservationSettlement::Finalized(finalized) => {
+            let receipt = finalized
+                .receipt
+                .as_ref()
+                .ok_or_else(|| {
+                    SettlementError::Backend(
+                        "finalized settlement has no receipt".into(),
+                    )
+                })?;
+
+            let previous_submission =
+                receipt.event.heritage.state.activations();
+
+            let previous_commitment =
+                receipt.event.qtm.commitment;
+
+            if materialized_payload.inputs.len()
+                != finalized.transaction.input.len()
+            {
+                return Err(SettlementError::Backend(format!(
+                    "materialized input count mismatch: payload={} transaction={}",
+                    materialized_payload.inputs.len(),
+                    finalized.transaction.input.len(),
+                )));
+            }
+
+            for (input_index, (payload_input, transaction_input)) in
+                materialized_payload
+                    .inputs
+                    .iter()
+                    .zip(finalized.transaction.input.iter())
+                    .enumerate()
+            {
+                if payload_input.previous_output
+                    != transaction_input.previous_output
+                {
+                    return Err(SettlementError::Backend(format!(
+                        "materialized input outpoint mismatch: input={} payload={} transaction={}",
+                        input_index,
+                        payload_input.previous_output,
+                        transaction_input.previous_output,
+                    )));
+                }
+            }
+
+            if materialized_payload.outputs.len()
+                != finalized.transaction.output.len()
+            {
+                return Err(SettlementError::Backend(format!(
+                    "materialized output count mismatch: payload={} transaction={}",
+                    materialized_payload.outputs.len(),
+                    finalized.transaction.output.len(),
+                )));
+            }
+
+            for (index, (payload_output, transaction_output)) in
+                materialized_payload
+                    .outputs
+                    .iter()
+                    .zip(finalized.transaction.output.iter())
+                    .enumerate()
+            {
+                if payload_output.vout as usize != index
+                    || payload_output.value != transaction_output.value.to_sat()
+                    || payload_output.script_pubkey
+                        != transaction_output.script_pubkey
+                {
+                    return Err(SettlementError::Backend(format!(
+                        "materialized output mismatch: vout={}",
+                        index,
+                    )));
+                }
+            }
+
+            let generated_packets =
+                finalized.wire_packets(commitment);
+
+            if generated_packets.is_empty() {
+                return Err(SettlementError::Backend(
+                    "finalized settlement produced no wire packets".into(),
+                ));
+            }
+
+            let settlement_txid =
+                finalized.transaction.compute_txid();
+
+            let mut packet_bytes = Vec::new();
+
+            for packet in &generated_packets {
+                if packet.txid() != settlement_txid
+                    || packet.commitment != commitment
+                {
+                    return Err(SettlementError::Backend(
+                        "generated packet does not match finalized settlement"
+                            .into(),
+                    ));
+                }
+
+                let payload = packet.serialize();
+
+                if payload.is_empty() {
+                    return Err(SettlementError::Backend(
+                        "wire-packet serialization failed".into(),
+                    ));
+                }
+
+                let frame_len = u32::try_from(payload.len())
+                    .map_err(|error| {
+                        SettlementError::Backend(error.to_string())
+                    })?;
+
+                packet_bytes.extend_from_slice(
+                    &frame_len.to_be_bytes(),
+                );
+                packet_bytes.extend_from_slice(&payload);
+            }
+
+            persist_wirepackets(
+                substrate,
+                activation,
+                submission,
+                &packet_bytes,
+            )
+            .map_err(|error| {
+                SettlementError::Backend(format!(
+                    "wire-packet persistence failed: substrate={} activation={} submission={}: {}",
+                    substrate, activation, submission, error,
+                ))
+            })?;
+
+            let persisted_bytes =
+                load_wirepackets(substrate, activation, submission)
+                    .map_err(|error| {
+                        SettlementError::Backend(format!(
+                            "wire-packet reload failed: submission={}: {}",
+                            submission, error,
+                        ))
+                    })?;
+
+            let wire_packets =
+                decode_wirepackets(&persisted_bytes)?;
+
+            if wire_packets.len() != generated_packets.len()
+                || wire_packets.iter().any(|packet| {
+                    packet.txid() != settlement_txid
+                        || packet.commitment != commitment
+                })
+            {
+                return Err(SettlementError::Backend(
+                    "persisted packets differ from finalized submission"
+                        .into(),
+                ));
+            }
+
+            println!(
+                "qtm_wirepackets=persisted substrate={} activation={} network={} submission={} commitment={} packets={} bytes={}",
+                substrate,
+                activation,
+                network,
+                submission,
+                hex::encode(commitment),
+                wire_packets.len(),
+                persisted_bytes.len(),
+            );
+
+            (
+                finalized,
+                materialized_payload,
+                previous_submission,
+                previous_commitment,
+                wire_packets,
+            )
+        }
+
+        ObservationSettlement::Exile(event) => {
+            let previous_submission =
+                event.heritage.state.activations();
+
+            let previous_commitment = event.qtm.commitment;
+
+            let direction = Miner::direction(
+                event.heritage,
+                Scale::Global,
+            );
+
+            let manifold = &direction.heritage().state;
+
+            let (materialized, payload) =
+                ObservedBitcoinTransaction::new_transact(
+                    manifold,
+                    materialized_payload,
+                    observation_source,
+                    &direction,
+                    usize::try_from(submission).map_err(|error| {
+                        SettlementError::Backend(format!(
+                            "exile submission index exceeds supported range: {}",
+                            error,
+                        ))
+                    })?,
+                )
+                .map_err(|error| {
+                    SettlementError::Backend(format!(
+                        "exile transaction materialization failed: {}",
+                        error,
+                    ))
+                })?;
+
+            println!(
+                "bitcoin_exile=materialized submission={} txid={}",
+                submission,
+                materialized.txid,
+            );
+
+            (
+                FinalizedSettlement::new(
+                    None,
+                    materialized.transaction,
+                ),
+                payload,
+                previous_submission,
+                previous_commitment,
+                Vec::new(),
+            )
+        }
+    };
 
     if materialized_payload.inputs.len()
         != finalized.transaction.input.len()
@@ -500,104 +736,6 @@ pub fn refresh<R: PrevoutResolver>(
             )));
         }
     }
-
-    let generated_packets = finalized.wire_packets(commitment);
-
-    if generated_packets.is_empty() {
-        return Err(SettlementError::Backend(
-            "finalized settlement produced no wire packets".into(),
-        ));
-    }
-
-    let settlement_txid = finalized.transaction.compute_txid();
-    let mut packet_bytes = Vec::new();
-
-    for packet in &generated_packets {
-        if packet.txid() != settlement_txid
-            || packet.commitment != commitment
-        {
-            return Err(SettlementError::Backend(
-                "generated packet does not match finalized settlement"
-                    .into(),
-            ));
-        }
-
-        let payload = packet.serialize();
-
-        if payload.is_empty() {
-            return Err(SettlementError::Backend(
-                "wire-packet serialization failed".into(),
-            ));
-        }
-
-        let frame_len = u32::try_from(payload.len())
-            .map_err(|error| {
-                SettlementError::Backend(error.to_string())
-            })?;
-
-        packet_bytes.extend_from_slice(&frame_len.to_be_bytes());
-        packet_bytes.extend_from_slice(&payload);
-    }
-
-    persist_wirepackets(
-        substrate,
-        activation,
-        submission,
-        &packet_bytes,
-    )
-    .map_err(|error| {
-        SettlementError::Backend(format!(
-            "wire-packet persistence failed: substrate={} activation={} submission={}: {}",
-            substrate, activation, submission, error,
-        ))
-    })?;
-
-    let persisted_bytes =
-        load_wirepackets(substrate, activation, submission)
-            .map_err(|error| {
-                SettlementError::Backend(format!(
-                    "wire-packet reload failed: submission={}: {}",
-                    submission, error,
-                ))
-            })?;
-
-    let wire_packets = decode_wirepackets(&persisted_bytes)?;
-
-    if wire_packets.len() != generated_packets.len()
-        || wire_packets.iter().any(|packet| {
-            packet.txid() != settlement_txid
-                || packet.commitment != commitment
-        })
-    {
-        return Err(SettlementError::Backend(
-            "persisted packets differ from finalized submission".into(),
-        ));
-    }
-
-    println!(
-        "qtm_wirepackets=persisted substrate={} activation={} network={} submission={} commitment={} packets={} bytes={}",
-        substrate,
-        activation,
-        network,
-        submission,
-        hex::encode(commitment),
-        wire_packets.len(),
-        persisted_bytes.len(),
-    );
-
-    let receipt = finalized
-        .receipt
-        .as_ref()
-        .ok_or_else(|| {
-            SettlementError::Backend(
-                "finalized settlement has no receipt".into(),
-            )
-        })?;
-
-    let previous_submission =
-        receipt.event.heritage.state.activations();
-
-    let previous_commitment = receipt.event.qtm.commitment;
 
     let mut resolved_prevouts =
         Vec::with_capacity(finalized.transaction.input.len());
@@ -768,6 +906,7 @@ pub fn refresh<R: PrevoutResolver>(
 
     Ok(Some((psbt, retained_mass, commitment, depth)))
 }
+
 #[inline(always)]
 fn decode_wirepackets(
     bytes: &[u8],
