@@ -263,6 +263,11 @@ fn fail(message: impl Into<String>) -> SettlementError {
     SettlementError::Backend(message.into())
 }
 
+#[inline(always)]
+fn packet_outpoint(packet: &WirePacket) -> OutPoint {
+    OutPoint::new(packet.txid(), packet.vout())
+}
+
 /// Validates the clip and budget, processes the observation (delegated to
 /// pipeline.process -> SettlementEngine), persists and verifies wire packets,
 /// resolves parent outpoints from persisted packets, and builds an unsigned PSBT.
