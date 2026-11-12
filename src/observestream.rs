@@ -536,10 +536,11 @@ pub fn refresh<R: PrevoutResolver>(
     let private_key = qtm.coordinate;
     let heritage = qtm_open_manifold_until(substrate, activation);
 
-let parent_submission = heritage.state.activations();
+
 
     let mut resolved_prevouts =
         Vec::with_capacity(finalized.transaction.input.len());
+    let parent_submission = finalized.receipt.state.activations();
 
     for (input_index, payload_input) in
         materialized_payload.inputs.iter().enumerate()
