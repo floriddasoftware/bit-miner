@@ -1,9 +1,12 @@
 
-use qtm_graph::graph::frame::{Depth, Direction};
+use qtm_graph::graph::frame::Depth;
 use quantom_value::{QuantPerm, Retain};
 
-use crate::bitcoinoutputqpinput::BitcoinOutput;
-use crate::qpoutputsbitcoininput::BitcoinInput;
+use crate::{
+    bitcoinoutputqpinput::BitcoinOutput,
+    miner::Miner,
+    qpoutputsbitcoininput::BitcoinInput,
+};
 
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -33,7 +36,7 @@ pub trait PayloadComponent: std::fmt::Debug + Send + Sync {
     ) -> Retain {
         let mut depth = Depth::new("qp/payload");
         depth.insert(identifier, position, self.retained(manifold));
-        Direction::realize_depth(manifold, &depth)
+        Miner::deep(manifold, &depth)
     }
 
     #[inline(always)]
@@ -192,7 +195,7 @@ impl BitcoinPayload {
                 depth.insert("address", address_offset + position, retained);
 
                 mass.saturating_add(
-                    Direction::realize_depth(manifold, &depth).mass,
+                    Miner::deep(manifold, &depth).mass,
                 )
             });
 
