@@ -25,10 +25,6 @@ use crate::{
     sharedtypes::SettlementState,
 };
 
-pub enum ObservationSettlement {
-    Finalized(FinalizedSettlement),
-    Exile(PQ44Event),
-}
 
 pub struct BitcoinObservationPipeline {
     utxo: BitcoinUTXOCollector,
@@ -118,12 +114,12 @@ impl BitcoinObservationPipeline {
         observed: ObservedBitcoinTransaction,
     ) -> Result<
         Option<(
-            ObservationSettlement,
-            BitcoinPayload,
-            u128,
-            [u8; 32],
-            Depth,
-        )>,
+    FinalizedSettlement,
+    BitcoinPayload,
+    u128,
+    [u8; 32],
+    Depth,
+   )>,
         SettlementError,
     > {
         if !self.chain.active {
@@ -225,16 +221,16 @@ impl BitcoinObservationPipeline {
         )?;
 
         Ok(materialized.map(
-            |(finalized, payload, retained_mass)| {
-                (
-                    ObservationSettlement::Finalized(finalized),
-                    payload,
-                    retained_mass,
-                    commitment,
-                    depth,
-                )
-            },
-        ))
+    |(finalized, payload, retained_mass)| {
+        (
+            finalized,
+            payload,
+            retained_mass,
+            commitment,
+            depth,
+        )
+    },
+       ))
     }
 
     #[inline(always)]
