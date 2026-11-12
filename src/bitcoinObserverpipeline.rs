@@ -1,3 +1,4 @@
+
 use qp_hd::{
     commands::{
         load_event_at_activation,
@@ -8,6 +9,7 @@ use qp_hd::{
 };
 use qtm_graph::graph::frame::Depth;
 use quantom_value::QuantPerm;
+
 use crate::{
     bitcoinpayload::BitcoinPayload,
     bitcoinutxocollector::BitcoinUTXOCollector,
@@ -125,13 +127,13 @@ impl BitcoinObservationPipeline {
                 ))
             })?;
 
-        let current = qtm_open_manifold_until(
+        let pre_settlement = qtm_open_manifold_until(
             substrate,
             self.activation,
         );
 
         let (bitcoin, retained_mass) =
-            self.bitcoin_payload(&observed, &current.state)?;
+            self.bitcoin_payload(&observed, &pre_settlement.state)?;
 
         let depth = self
             .miner
@@ -146,12 +148,23 @@ impl BitcoinObservationPipeline {
                 ))
             })?;
 
-        let persisted = load_event_at_activation(
-            substrate,
-            self.activation,
-        );
+        let submission_count = self
+            .miner
+            .submissions
+            .get(substrate)
+            .copied()
+            .unwrap_or(0);
 
-        match persisted {
+        let submission = usize::try_from(
+            submission_count.saturating_sub(1),
+        )
+        .map_err(|error| {
+            SettlementError::Backend(format!(
+                "submission index exceeds supported range: {error}",
+            ))
+        })?;
+
+        match load_event_at_activation(substrate, self.activation) {
             PersistedEvent::Transit(event) => {
                 let locked = qp_hd::protocol_id::LockedStructure {
                     dimension: event.heritage.state.dimension(),
@@ -167,16 +180,19 @@ impl BitcoinObservationPipeline {
                     SettlementError::Backend(error.to_string())
                 })?;
 
+                let commitment = event_receipt.event.qtm.commitment;
+
                 let materialized = self.advance_materialized(
                     substrate,
                     bitcoin,
                     retained_mass,
                     event_receipt,
                     observed,
+                    submission,
                 )?;
 
                 Ok(materialized.map(
-                    |(finalized, payload, retained_mass, commitment)| {
+                    |(finalized, payload, retained_mass)| {
                         (
                             ObservationSettlement::Finalized(finalized),
                             payload,
@@ -219,12 +235,12 @@ impl BitcoinObservationPipeline {
         retained_mass: u128,
         event_receipt: EventReceipt,
         observed: ObservedBitcoinTransaction,
+        submission: usize,
     ) -> Result<
         Option<(
             FinalizedSettlement,
             BitcoinPayload,
             u128,
-            [u8; 32],
         )>,
         SettlementError,
     > {
@@ -232,16 +248,18 @@ impl BitcoinObservationPipeline {
             return Ok(None);
         }
 
-        let commitment = event_receipt.event.qtm.commitment;
-
         let (finalized, payload) = SettlementEngine::new(substrate)
-            .process(event_receipt, bitcoin, observed)?;
+            .process(
+                event_receipt,
+                bitcoin,
+                observed,
+                submission,
+            )?;
 
         Ok(Some((
             finalized,
             payload,
             retained_mass,
-            commitment,
         )))
     }
 }
