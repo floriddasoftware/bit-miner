@@ -1,6 +1,4 @@
-
 use std::error::Error;
-
 use bit_miner::{
     observestream::{
         MempoolSpaceStream,
@@ -9,30 +7,29 @@ use bit_miner::{
     BitcoinObservationPipeline,
     RenderState,
 };
-
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let _ = rustls::crypto::ring::default_provider()
         .install_default();
-
     let args = std::env::args().collect::<Vec<_>>();
-
     let activation = args
         .get(1)
         .expect("missing activation")
         .parse::<u64>()
         .expect("invalid activation");
-
     let substrate = args
         .get(2)
         .expect("missing substrate")
         .clone();
-
+    let network = args
+        .get(3)
+        .expect("missing network")
+        .clone();
     let mut pipeline = BitcoinObservationPipeline::new(
         activation,
         &substrate,
+        &network,
     )?;
-
     let mut windows = pipeline
         .miner()
         .clips()
@@ -41,25 +38,20 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
             RenderState::window(clip.substrate.clone())
         })
         .collect::<Vec<_>>();
-
     let mut stream = MempoolSpaceStream::connect(
         activation,
         MempoolStreamMode::TransactionIds,
     )
     .await?;
-
     loop {
         for window in &mut windows {
             let substrate = window.substrate.clone();
-
             match stream.stream(
                 &substrate,
                 &mut pipeline,
             ).await? {
                 Ok(Some(_)) => {}
-
                 Ok(None) => {}
-
                 Err(error) => {
                     eprintln!(
                         "Pipeline settlement failed for {}: {}",
