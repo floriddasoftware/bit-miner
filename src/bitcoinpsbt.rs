@@ -1,536 +1,176 @@
+
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::HashSet,
     error::Error,
-    io::ErrorKind,
-    str::FromStr,
+    io::{Error as IoError, ErrorKind},
 };
 
-use bitcoin::{OutPoint, Txid};
-use futures_util::{SinkExt, StreamExt};
-use qp_hd::commands::{load_budget, load_wirepackets, persist_wirepackets};
-use qp_hd::pathsregistry::CoinType;
-use serde_json::Value;
-use tokio::net::TcpStream;
-use tokio_tungstenite::{
-    connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream,
+use bitcoin::{
+    psbt::Psbt,
+    OutPoint,
+    Transaction,
+    TxOut,
+    Txid,
 };
 
 use crate::{
-    broadcast::{FinalizedSettlement, WirePacket},
-    observebitcointransaction::ObservedBitcoinTransaction,
-    settlement::SettlementError,
-    BitcoinObservationPipeline,
+    broadcast::{
+        FinalizedSettlement,
+        WirePacket,
+    },
 };
 
-pub type Blockchain = CoinType;
+pub type BitcoinPsbtResult<T> =
+    Result<T, Box<dyn Error + Send + Sync>>;
 
-pub type ObservationResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
-
-/// Unsigned coordination result: canonical finalized settlement, unsigned PSBT
-/// for the wallet to sign, retained mass, QTM commitment.
-pub type PipelineOutcome = Result<
-    Option<(FinalizedSettlement, BitcoinPsbt, u128, [u8; 32])>,
-    SettlementError,
->;
-
-/// Persisted parent packets keyed by exact OutPoint. Each entry keeps the
-/// submission number it was persisted under; the packet carries its own commitment.
-type ParentIndex = HashMap<OutPoint, Vec<(u64, WirePacket)>>;
-
-const MEMPOOL_SPACE_WS: &str = "wss://mempool.space/api/v1/ws";
-const MEMPOOL_SPACE_API: &str = "https://mempool.space/api";
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum BlockchainStream {
-    Transactions,
+pub struct ResolvedPrevout {
+    pub outpoint: OutPoint,
+    pub output: TxOut,
+    pub submission: u64,
+    pub commitment: [u8; 32],
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum MempoolStreamMode {
-    TransactionIds,
-    FullTransactions,
-}
+pub trait PrevoutResolver {
+    fn resolve(
+        &self,
+        outpoint: &OutPoint,
+        submission: u64,
+        commitment: [u8; 32],
+    ) -> BitcoinPsbtResult<ResolvedPrevout>;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct BitcoinObservationSource {
-    pub activation: u64,
-}
+    #[inline]
+    fn resolve_packet(
+        &self,
+        packet: &WirePacket,
+        submission: u64,
+    ) -> BitcoinPsbtResult<ResolvedPrevout> {
+        let resolved = self.resolve(
+            &packet.outpoint,
+            submission,
+            packet.commitment,
+        )?;
 
-impl BitcoinObservationSource {
-    #[inline(always)]
-    pub const fn mempool_space(activation: u64) -> Self {
-        Self { activation }
-    }
-}
-
-#[derive(Clone, Debug)]
-pub enum BitcoinObservation {
-    Transaction(bitcoin::Transaction),
-}
-
-impl BitcoinObservation {
-    #[inline(always)]
-    pub const fn stream(&self) -> BlockchainStream {
-        BlockchainStream::Transactions
-    }
-
-    #[inline(always)]
-    pub const fn blockchain(&self) -> Blockchain {
-        Blockchain::Bitcoin
-    }
-}
-
-pub struct MempoolSpaceStream {
-    socket: WebSocketStream<MaybeTlsStream<TcpStream>>,
-    client: reqwest::Client,
-    source: BitcoinObservationSource,
-    mode: MempoolStreamMode,
-    pending: VecDeque<BitcoinObservation>,
-    skipped: u64,
-}
-
-impl MempoolSpaceStream {
-    pub async fn connect(
-        activation: u64,
-        mode: MempoolStreamMode,
-    ) -> ObservationResult<Self> {
-        let (mut socket, _) = connect_async(MEMPOOL_SPACE_WS).await?;
-
-        let subscription = match mode {
-            MempoolStreamMode::TransactionIds => r#"{"track-mempool-txids":true}"#,
-            MempoolStreamMode::FullTransactions => r#"{"track-mempool":true}"#,
+        let invalid = |message: String| {
+            IoError::new(ErrorKind::InvalidData, message)
         };
 
-        socket.send(Message::Text(subscription.into())).await?;
+        if resolved.outpoint != packet.outpoint {
+            return Err(invalid(format!(
+                "parent outpoint mismatch: expected={} resolved={}",
+                packet.outpoint, resolved.outpoint,
+            )).into());
+        }
+
+        if resolved.submission != submission {
+            return Err(invalid(format!(
+                "parent submission mismatch: expected={} resolved={}",
+                submission, resolved.submission,
+            )).into());
+        }
+
+        if resolved.commitment != packet.commitment {
+            return Err(invalid(format!(
+                "parent commitment mismatch: submission={}",
+                submission,
+            )).into());
+        }
+
+        if resolved.output.value.to_sat() != packet.value {
+            return Err(invalid(format!(
+                "parent value mismatch: outpoint={} expected={} resolved={}",
+                packet.outpoint,
+                packet.value,
+                resolved.output.value.to_sat(),
+            )).into());
+        }
+
+        if resolved.output.script_pubkey != packet.script_pubkey {
+            return Err(invalid(format!(
+                "parent script mismatch: outpoint={}",
+                packet.outpoint,
+            )).into());
+        }
+
+        Ok(resolved)
+    }
+}
+
+pub struct BitcoinPsbt {
+    pub psbt: Psbt,
+    pub unsigned_txid: Txid,
+}
+
+impl BitcoinPsbt {
+    #[inline]
+    pub fn from_settlement(
+        finalized: &FinalizedSettlement,
+        resolved_prevouts: Vec<ResolvedPrevout>,
+    ) -> BitcoinPsbtResult<Self> {
+        let transaction = &finalized.transaction;
+
+        if transaction.input.len() != resolved_prevouts.len() {
+            return Err(IoError::new(
+                ErrorKind::InvalidData,
+                format!(
+                    "prevout count mismatch: inputs={} resolved={}",
+                    transaction.input.len(),
+                    resolved_prevouts.len(),
+                ),
+            ).into());
+        }
+
+        let mut seen = HashSet::with_capacity(
+            transaction.input.len(),
+        );
+
+        for (index, (input, prevout)) in transaction
+            .input
+            .iter()
+            .zip(&resolved_prevouts)
+            .enumerate()
+        {
+            if input.previous_output != prevout.outpoint {
+                return Err(IoError::new(
+                    ErrorKind::InvalidData,
+                    format!(
+                        "prevout order mismatch at input {}: expected={} resolved={}",
+                        index,
+                        input.previous_output,
+                        prevout.outpoint,
+                    ),
+                ).into());
+            }
+
+            if !seen.insert(prevout.outpoint) {
+                return Err(IoError::new(
+                    ErrorKind::InvalidData,
+                    format!(
+                        "duplicate input outpoint: {}",
+                        prevout.outpoint,
+                    ),
+                ).into());
+            }
+        }
+
+        let unsigned_txid = transaction.compute_txid();
+        let mut psbt = Psbt::from_unsigned_tx(transaction.clone())?;
+
+        for (input, prevout) in psbt
+            .inputs
+            .iter_mut()
+            .zip(resolved_prevouts)
+        {
+            input.witness_utxo = Some(prevout.output);
+        }
 
         Ok(Self {
-            socket,
-            client: reqwest::Client::new(),
-            source: BitcoinObservationSource::mempool_space(activation),
-            mode,
-            pending: VecDeque::new(),
-            skipped: 0,
+            psbt,
+            unsigned_txid,
         })
     }
 
     #[inline(always)]
-    pub const fn source(&self) -> BitcoinObservationSource {
-        self.source
+    pub fn unsigned_txid(&self) -> Txid {
+        self.unsigned_txid
     }
-
-    #[inline(always)]
-    pub const fn mode(&self) -> MempoolStreamMode {
-        self.mode
-    }
-
-    #[inline(always)]
-    pub const fn skipped(&self) -> u64 {
-        self.skipped
-    }
-
-    pub async fn next_observation(&mut self) -> ObservationResult<BitcoinObservation> {
-        loop {
-            if let Some(observation) = self.pending.pop_front() {
-                return Ok(observation);
-            }
-            self.fill().await?;
-        }
-    }
-
-    pub async fn stream<R: PrevoutResolver>(
-        &mut self,
-        substrate: &str,
-        pipeline: &mut BitcoinObservationPipeline,
-        resolver: &R,
-    ) -> ObservationResult<PipelineOutcome> {
-        let BitcoinObservation::Transaction(transaction) =
-            self.next_observation().await?;
-
-        let observed = ObservedBitcoinTransaction::from_observedtransaction(
-            transaction,
-            self.source,
-        );
-
-        Ok(refresh(pipeline, substrate, observed, resolver))
-    }
-
-    async fn fill(&mut self) -> ObservationResult<()> {
-        let message = self
-            .socket
-            .next()
-            .await
-            .ok_or("Mempool.space WebSocket closed")??;
-
-        let value: Value = match message {
-            Message::Text(text) => serde_json::from_str(text.as_ref())?,
-            Message::Binary(bytes) => serde_json::from_slice(&bytes)?,
-            Message::Close(_) => return Err("Mempool.space WebSocket closed".into()),
-            Message::Ping(_) | Message::Pong(_) | Message::Frame(_) => return Ok(()),
-        };
-
-        self.decode(&value).await
-    }
-
-    async fn decode(&mut self, value: &Value) -> ObservationResult<()> {
-        let mut ids = Vec::<String>::new();
-        let mut seen = HashSet::<String>::new();
-        let mut want = |id: &str| {
-            if seen.insert(id.to_owned()) {
-                ids.push(id.to_owned());
-            }
-        };
-
-        for entry in added(value, "mempool-transactions").into_iter().flatten() {
-            match entry
-                .get("hex")
-                .and_then(Value::as_str)
-                .map(decode_hex_transaction)
-            {
-                Some(Ok(tx)) => {
-                    self.pending.push_back(BitcoinObservation::Transaction(tx));
-                    continue;
-                }
-                Some(Err(_)) => self.skipped = self.skipped.saturating_add(1),
-                None => {}
-            }
-            if let Some(id) = entry.get("txid").and_then(Value::as_str) {
-                want(id);
-            }
-        }
-
-        for id in added(value, "mempool-txids")
-            .into_iter()
-            .flatten()
-            .filter_map(Value::as_str)
-        {
-            want(id);
-        }
-
-        if let Some(id) = value.get("txid").and_then(Value::as_str) {
-            want(id);
-        }
-
-        for id in ids {
-            let Ok(txid) = Txid::from_str(&id) else {
-                self.skipped = self.skipped.saturating_add(1);
-                continue;
-            };
-
-            match fetch_decode(&self.client, format!("{MEMPOOL_SPACE_API}/tx/{txid}/raw")).await {
-                Ok(tx) => self.pending.push_back(BitcoinObservation::Transaction(tx)),
-                Err(_) => self.skipped = self.skipped.saturating_add(1),
-            }
-        }
-
-        Ok(())
-    }
-}
-
-#[inline(always)]
-fn added<'a>(value: &'a Value, key: &str) -> Option<&'a Vec<Value>> {
-    value.get(key)?.get("added")?.as_array()
-}
-
-#[inline(always)]
-fn decode_hex_transaction(hex_tx: &str) -> ObservationResult<bitcoin::Transaction> {
-    Ok(bitcoin::consensus::deserialize(&hex::decode(hex_tx)?)?)
-}
-
-async fn fetch_decode(
-    client: &reqwest::Client,
-    url: String,
-) -> ObservationResult<bitcoin::Transaction> {
-    let raw = client.get(url).send().await?.error_for_status()?.bytes().await?;
-    Ok(bitcoin::consensus::deserialize(&raw)?)
-}
-
-#[inline(always)]
-fn fail(message: impl Into<String>) -> SettlementError {
-    SettlementError::Backend(message.into())
-}
-
-/// The output a packet describes (WirePacket carries its own outpoint).
-#[inline(always)]
-fn packet_outpoint(packet: &WirePacket) -> OutPoint {
-    packet.outpoint
-}
-
-/// Validates the clip and budget, processes the observation (delegated to
-/// pipeline.process -> SettlementEngine), persists and verifies wire packets,
-/// resolves parent outpoints from persisted packets, and builds an unsigned PSBT.
-/// The wallet client owns signing and broadcast.
-pub fn refresh<R: PrevoutResolver>(
-    pipeline: &mut BitcoinObservationPipeline,
-    substrate: &str,
-    observed: ObservedBitcoinTransaction,
-    resolver: &R,
-) -> PipelineOutcome {
-    let activation = pipeline
-        .miner
-        .clip(substrate)
-        .map(|clip| clip.activation)
-        .ok_or_else(|| fail(format!("no active miner clip: substrate={substrate}")))?;
-
-    let network = pipeline.network().to_owned();
-
-    if observed.source.activation != activation {
-        return Err(fail(format!(
-            "observation activation mismatch: substrate={substrate} observation={} active={activation}",
-            observed.source.activation,
-        )));
-    }
-
-    let budget = load_budget(substrate, activation, &network).map_err(|e| {
-        fail(format!(
-            "budget load failed: substrate={substrate} activation={activation} network={network}: {e}"
-        ))
-    })?;
-
-    let mut persisted = 0u64;
-    let mut ended = false;
-    let mut parents = ParentIndex::new();
-
-    for number in 1..=budget.max_events {
-        match load_wirepackets(substrate, activation, number) {
-            Ok(bytes) => {
-                if ended {
-                    return Err(fail(format!(
-                        "submission sequence gap: substrate={substrate} activation={activation} missing_before={number}"
-                    )));
-                }
-
-                let packets = decode_wirepackets(&bytes)?;
-                let commitment = packets[0].commitment;
-
-                if packets.iter().any(|p| p.commitment != commitment) {
-                    return Err(fail(format!(
-                        "mixed commitments in submission: {number}"
-                    )));
-                }
-
-                for packet in packets {
-                    parents
-                        .entry(packet_outpoint(&packet))
-                        .or_default()
-                        .push((number, packet));
-                }
-
-                persisted = number;
-            }
-            Err(e) if e.kind() == ErrorKind::NotFound => ended = true,
-            Err(e) => {
-                return Err(fail(format!(
-                    "wirepacket load failed: substrate={substrate} activation={activation} submission={number}: {e}"
-                )));
-            }
-        }
-    }
-
-    // Persisted wire packets are authoritative; repair the in-memory counter.
-    pipeline
-        .miner
-        .submissions
-        .insert(substrate.to_owned(), persisted);
-
-    let submission = persisted
-        .checked_add(1)
-        .filter(|next| *next <= budget.max_events)
-        .ok_or_else(|| {
-            fail(format!(
-                "submission budget exhausted: substrate={substrate} activation={activation} network={network} max={}",
-                budget.max_events,
-            ))
-        })?;
-
-    let Some((finalized, payload, retained_mass, commitment)) =
-        pipeline.process(substrate, observed)?
-    else {
-        return Ok(None);
-    };
-
-    let tx = &finalized.transaction;
-
-    if payload.inputs.len() != tx.input.len()
-        || payload
-            .inputs
-            .iter()
-            .zip(&tx.input)
-            .any(|(p, t)| p.previous_output != t.previous_output)
-    {
-        return Err(fail(
-            "materialized inputs do not match finalized transaction",
-        ));
-    }
-
-    if payload.outputs.len() != tx.output.len()
-        || payload
-            .outputs
-            .iter()
-            .zip(&tx.output)
-            .enumerate()
-            .any(|(i, (p, t))| {
-                p.vout as usize != i
-                    || p.value != t.value.to_sat()
-                    || p.script_pubkey != t.script_pubkey
-            })
-    {
-        return Err(fail(
-            "materialized outputs do not match finalized transaction",
-        ));
-    }
-
-    // The current commitment applies only to the current submission's packets.
-    let generated = finalized.wire_packets(commitment);
-
-    if generated.is_empty() {
-        return Err(fail("finalized settlement produced no wire packets"));
-    }
-
-    let txid = tx.compute_txid();
-    let matches = |p: &WirePacket| p.txid() == txid && p.commitment == commitment;
-
-    if !generated.iter().all(matches) {
-        return Err(fail("generated packet does not match finalized settlement"));
-    }
-
-    let mut packet_bytes = Vec::new();
-
-    for packet in &generated {
-        let body = packet.serialize();
-
-        if body.is_empty() {
-            return Err(fail("wire-packet serialization failed"));
-        }
-
-        let len = u32::try_from(body.len()).map_err(|e| fail(e.to_string()))?;
-        packet_bytes.extend_from_slice(&len.to_be_bytes());
-        packet_bytes.extend_from_slice(&body);
-    }
-
-    persist_wirepackets(substrate, activation, submission, &packet_bytes)
-        .map_err(|e| {
-            fail(format!(
-                "wire-packet persistence failed: substrate={substrate} activation={activation} submission={submission}: {e}"
-            ))
-        })?;
-
-    let persisted_bytes = load_wirepackets(substrate, activation, submission)
-        .map_err(|e| {
-            fail(format!(
-                "wire-packet reload failed: submission={submission}: {e}"
-            ))
-        })?;
-
-    let wire_packets = decode_wirepackets(&persisted_bytes)?;
-
-    if wire_packets.len() != generated.len() || !wire_packets.iter().all(matches) {
-        return Err(fail("persisted packets differ from finalized submission"));
-    }
-
-    // Commit only after persistence and verification succeed.
-    pipeline
-        .miner
-        .submissions
-        .insert(substrate.to_owned(), submission);
-
-    println!(
-        "qtm_wirepackets=persisted substrate={substrate} activation={activation} network={network} submission={submission} commitment={} packets={} bytes={}",
-        hex::encode(commitment),
-        wire_packets.len(),
-        persisted_bytes.len(),
-    );
-
-    // Parent identity comes from the persisted parent packet itself: its own
-    // submission number and its own commitment, never the current event's.
-    let mut prevouts = Vec::with_capacity(tx.input.len());
-
-    for (i, input) in tx.input.iter().enumerate() {
-        let outpoint = &input.previous_output;
-
-        let (parent_submission, parent_packet) =
-            match parents.get(outpoint).map(Vec::as_slice) {
-                Some([(submission, packet)]) => (*submission, packet),
-                Some(_) => {
-                    return Err(fail(format!(
-                        "ambiguous parent packets: input={i} outpoint={outpoint}"
-                    )));
-                }
-                None => {
-                    return Err(fail(format!(
-                        "missing parent packet: input={i} outpoint={outpoint}"
-                    )));
-                }
-            };
-
-        let resolved = resolver
-            .resolve_packet(parent_packet, parent_submission)
-            .map_err(|e| {
-                fail(format!(
-                    "outpoint resolution failed: input={i} outpoint={outpoint} parent_submission={parent_submission} parent_commitment={}: {e}",
-                    hex::encode(parent_packet.commitment),
-                ))
-            })?;
-
-        if resolved.outpoint != *outpoint
-            || resolved.submission != parent_submission
-            || resolved.commitment != parent_packet.commitment
-        {
-            return Err(fail(format!(
-                "resolved prevout mismatch: input={i} outpoint={outpoint}"
-            )));
-        }
-
-        prevouts.push(resolved);
-    }
-
-    let psbt = BitcoinPsbt::from_settlement(&finalized, prevouts)
-        .map_err(|e| fail(format!("Bitcoin PSBT preparation failed: {e}")))?;
-
-    println!(
-        "bitcoin_psbt=prepared submission={submission} unsigned_txid={}",
-        psbt.unsigned_txid(),
-    );
-
-    for packet in wire_packets {
-        pipeline.miner().broadcaster.publish(packet);
-    }
-
-    Ok(Some((finalized, psbt, retained_mass, commitment)))
-}
-
-fn decode_wirepackets(bytes: &[u8]) -> Result<Vec<WirePacket>, SettlementError> {
-    let mut rest = bytes;
-    let mut packets = Vec::new();
-
-    while !rest.is_empty() {
-        let (head, tail) = rest
-            .split_at_checked(4)
-            .ok_or_else(|| fail("truncated wire-packet frame header"))?;
-
-        let len = u32::from_be_bytes(
-            head.try_into()
-                .map_err(|_| fail("invalid wire-packet frame header"))?,
-        ) as usize;
-
-        if !(WirePacket::MIN_SIZE..=WirePacket::MAX_SIZE).contains(&len) {
-            return Err(fail(format!("invalid wire-packet frame length={len}")));
-        }
-
-        let (frame, tail) = tail
-            .split_at_checked(len)
-            .ok_or_else(|| fail("truncated wire-packet frame payload"))?;
-
-        packets.push(
-            WirePacket::deserialize(frame)
-                .map_err(|e| fail(format!("wire-packet deserialization failed: {e}")))?,
-        );
-
-        rest = tail;
-    }
-
-    if packets.is_empty() {
-        return Err(fail("persisted wire-packet file is empty"));
-    }
-
-    Ok(packets)
 }
