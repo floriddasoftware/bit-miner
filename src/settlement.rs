@@ -1,5 +1,7 @@
+
 use bitcoin::Transaction;
 use quantom_value::QuantPerm;
+use qtm_graph::graph::frame::Direction;
 
 use crate::bitcoinpayload::BitcoinPayload;
 use crate::bitcoinreceipt::SettlementReceipt;
@@ -136,24 +138,35 @@ impl SettlementEngine {
         println!();
     }
 
-   #[inline(always)]
-pub fn process(
-    &self,
-    receipt: EventReceipt,
-    bitcoin: BitcoinPayload,
-    observed: ObservedBitcoinTransaction,
-) -> Result<(FinalizedSettlement, BitcoinPayload), SettlementError> {
-    let receipt = Self::settle(receipt)?;
-    let manifold = &receipt.event.heritage.state;
+    #[inline(always)]
+    pub fn process<C>(
+        &self,
+        receipt: EventReceipt,
+        bitcoin: BitcoinPayload,
+        observed: ObservedBitcoinTransaction,
+        cascade: C,
+    ) -> Result<(FinalizedSettlement, BitcoinPayload), SettlementError> {
+        let direction_heritage = &receipt.event.heritage;
+        let direction = Direction::from_heritage(direction_heritage);
 
-    let (transaction, payload) =
-        Self::materialize(manifold, bitcoin, observed)?;
+        let receipt = Self::settle(receipt)?;
 
-    Ok((
-        FinalizedSettlement::new(Some(receipt), transaction),
-        payload,
-    ))
-}
+        let post_settlement_manifold =
+            &receipt.event.heritage.state;
+
+        let (transaction, payload) = Self::materialize(
+            post_settlement_manifold,
+            bitcoin,
+            observed,
+            &direction,
+            cascade,
+        )?;
+
+        Ok((
+            FinalizedSettlement::new(Some(receipt), transaction),
+            payload,
+        ))
+    }
 
     #[inline(always)]
     pub fn coinbase(
@@ -163,29 +176,35 @@ pub fn process(
         FinalizedSettlement::new(None, transaction)
     }
 
-    
-#[inline(always)]
-fn materialize(
-    manifold: &QuantPerm,
-    bitcoin: BitcoinPayload,
-    observed: ObservedBitcoinTransaction,
-) -> Result<(Transaction, BitcoinPayload), SettlementError> {
-    if bitcoin.inputs.is_empty() {
-        return Err(SettlementError::Unsupported(
-            "cannot materialize a transaction without inputs",
-        ));
+    #[inline(always)]
+    fn materialize<C>(
+        manifold: &QuantPerm,
+        bitcoin: BitcoinPayload,
+        observed: ObservedBitcoinTransaction,
+        direction: &Direction,
+        submission: C,
+    ) -> Result<(Transaction, BitcoinPayload), SettlementError>
+    where
+        C: Into<usize>,
+    {
+        if bitcoin.inputs.is_empty() {
+            return Err(SettlementError::Unsupported(
+                "cannot materialize a transaction without inputs",
+            ));
+        }
+
+        let (materialized, payload) =
+            ObservedBitcoinTransaction::new_transact(
+                manifold,
+                bitcoin,
+                observed.source,
+                direction,
+                submission.into(),
+            )
+            .map_err(|error| {
+                SettlementError::Backend(error.to_string())
+            })?;
+
+        Ok((materialized.transaction, payload))
     }
-
-    let (materialized, payload) =
-        ObservedBitcoinTransaction::new_transact(
-            manifold,
-            bitcoin,
-            observed.source,
-        )
-        .map_err(|error| {
-            SettlementError::Backend(error.to_string())
-        })?;
-
-    Ok((materialized.transaction, payload))
-}
 }
