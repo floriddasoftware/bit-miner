@@ -1,21 +1,15 @@
+
 use bitcoin::{
     Amount,
     TxIn,
     Txid,
 };
+use qtm_graph::graph::frame::Direction;
 use quantom_value::QuantPerm;
 use qp_hd::protocolvalue::Qtm;
 
 use crate::{
-    bitcoinpayload::{
-        BitcoinPayload,
-        PayloadComponent,
-    },
-    bitcoinpsbt::{
-        PrevoutResolver,
-        ResolvedPrevout,
-    },
-    broadcast::WirePacket,
+    bitcoinpayload::BitcoinPayload,
     observestream::{
         BitcoinObservation,
         BitcoinObservationSource,
@@ -36,6 +30,7 @@ pub struct ObservedBitcoinTransaction {
     pub weight: Option<u64>,
     pub depends: Option<Vec<usize>>,
     pub template_index: Option<usize>,
+    pub transition_delta: Option<u128>,
 }
 
 impl ObservedBitcoinTransaction {
@@ -56,21 +51,50 @@ impl ObservedBitcoinTransaction {
     pub fn from_transaction(
         transaction: bitcoin::Transaction,
         source: BitcoinObservationSource,
-    ) -> Self {
+        payload: &BitcoinPayload,
+        direction: &Direction,
+        submission: usize,
+    ) -> ObservationResult<Self> {
         let txid = transaction.compute_txid();
         let coinbase = Self::is_coinbase(&transaction);
+        let heritage = direction.heritage();
+        let transition_delta = heritage.transition.delta;
 
-        Self {
+        let weight = u64::try_from(
+            payload.replay_mass(&heritage.state),
+        )
+        .map_err(|error| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("Payload replay mass exceeds supported range: {error}"),
+            )
+        })?;
+
+        let fee = u64::try_from(
+            payload.fee_mass(
+                &heritage.state,
+                transition_delta,
+            ),
+        )
+        .map_err(|error| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("Retained fee quantity exceeds supported range: {error}"),
+            )
+        })?;
+
+        Ok(Self {
             observation: None,
             source,
             txid,
             transaction,
             coinbase,
-            fee: None,
-            weight: None,
+            fee: Some(fee),
+            weight: Some(weight),
             depends: None,
-            template_index: None,
-        }
+            template_index: Some(submission),
+            transition_delta: Some(transition_delta),
+        })
     }
 
     #[inline(always)]
@@ -78,8 +102,16 @@ impl ObservedBitcoinTransaction {
         manifold: &QuantPerm,
         payload: BitcoinPayload,
         source: BitcoinObservationSource,
+        direction: &Direction,
+        submission: usize,
     ) -> ObservationResult<(Self, BitcoinPayload)> {
-        Self::new_transact(manifold, payload, source)
+        Self::new_transact(
+            manifold,
+            payload,
+            source,
+            direction,
+            submission,
+        )
     }
 
     #[inline(always)]
@@ -87,18 +119,25 @@ impl ObservedBitcoinTransaction {
         manifold: &QuantPerm,
         mut payload: BitcoinPayload,
         source: BitcoinObservationSource,
+        direction: &Direction,
+        submission: usize,
     ) -> ObservationResult<(Self, BitcoinPayload)> {
         let coordinate = Qtm::derive_coordinate(manifold);
+        let fee_payload = payload.clone();
+        let heritage = direction.heritage();
 
-        let fee = u64::try_from(payload.fee_mass(manifold))
-            .map_err(|error| {
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    format!(
-                        "Retained fee quantity exceeds supported range: {error}"
-                    ),
-                )
-            })?;
+        let fee = u64::try_from(
+            fee_payload.fee_mass(
+                &heritage.state,
+                heritage.transition.delta,
+            ),
+        )
+        .map_err(|error| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("Retained fee quantity exceeds supported range: {error}"),
+            )
+        })?;
 
         payload.outputs.sort_by_key(|output| output.vout);
 
@@ -126,9 +165,7 @@ impl ObservedBitcoinTransaction {
 
         let mut remaining_fee = fee;
 
-        for (position, output) in
-            payload.outputs.iter_mut().enumerate()
-        {
+        for (position, output) in payload.outputs.iter_mut().enumerate() {
             if output.vout as usize != position {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
@@ -142,10 +179,7 @@ impl ObservedBitcoinTransaction {
             }
 
             let fee_deduction = output.value.min(remaining_fee);
-
-            output.value = output
-                .value
-                .checked_sub(fee_deduction)
+            output.value = output.value.checked_sub(fee_deduction)
                 .ok_or_else(|| {
                     std::io::Error::new(
                         std::io::ErrorKind::InvalidInput,
@@ -156,8 +190,7 @@ impl ObservedBitcoinTransaction {
                     )
                 })?;
 
-            remaining_fee = remaining_fee
-                .checked_sub(fee_deduction)
+            remaining_fee = remaining_fee.checked_sub(fee_deduction)
                 .ok_or_else(|| {
                     std::io::Error::new(
                         std::io::ErrorKind::InvalidInput,
@@ -166,11 +199,7 @@ impl ObservedBitcoinTransaction {
                 })?;
 
             let previous_script = output.script_pubkey.clone();
-
-            let retained = output.assign(
-                manifold,
-                coordinate,
-            )?;
+            let retained = output.assign(manifold, coordinate)?;
 
             eprintln!(
                 "[bitcoin-retain] vout={} value_sat={} fee_deduction_sat={} remaining_fee_sat={} assigned_retained_mass={} previous_script_bytes={} assigned_script_bytes={}",
@@ -194,8 +223,7 @@ impl ObservedBitcoinTransaction {
             .into());
         }
 
-        let settlement_value = original_value
-            .checked_sub(fee)
+        let settlement_value = original_value.checked_sub(fee)
             .ok_or_else(|| {
                 std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
@@ -203,66 +231,23 @@ impl ObservedBitcoinTransaction {
                 )
             })?;
 
-        eprintln!(
-            "[bitcoin-retain] fee_sat={} settlement_value_sat={}->{} assigned_outputs={}",
-            fee,
-            original_value,
-            settlement_value,
-            payload.outputs.len(),
-        );
-
-        eprintln!(
-            "[bitcoin-materialize] inputs={} outputs={} fee_sat={} original_output_value_sat={} settlement_output_value_sat={}",
-            payload.inputs.len(),
-            payload.outputs.len(),
-            fee,
-            original_value,
-            settlement_value,
-        );
-
         let materialized_payload = payload.clone();
 
-        let inputs = payload
-            .inputs
+        let inputs = payload.inputs
             .into_iter()
-            .enumerate()
-            .map(|(index, input)| {
-                eprintln!(
-                    "[bitcoin-materialize-input] index={} outpoint={} is_null={} script_sig_bytes={} witness_items={} witness_bytes={} sequence={:?}",
-                    index,
-                    input.previous_output,
-                    input.previous_output.is_null(),
-                    input.script_sig.len(),
-                    input.witness.len(),
-                    input.witness.iter().map(|item| item.len()).sum::<usize>(),
-                    input.sequence,
-                );
-
-                TxIn {
-                    previous_output: input.previous_output,
-                    script_sig: input.script_sig,
-                    sequence: input.sequence,
-                    witness: input.witness,
-                }
+            .map(|input| TxIn {
+                previous_output: input.previous_output,
+                script_sig: input.script_sig,
+                sequence: input.sequence,
+                witness: input.witness,
             })
             .collect::<Vec<_>>();
 
-        let outputs = payload
-            .outputs
+        let outputs = payload.outputs
             .into_iter()
-            .enumerate()
-            .map(|(index, output)| {
-                eprintln!(
-                    "[bitcoin-materialize-output] index={} value_sat={} script_pubkey_bytes={}",
-                    index,
-                    output.value,
-                    output.script_pubkey.len(),
-                );
-
-                bitcoin::TxOut {
-                    value: Amount::from_sat(output.value),
-                    script_pubkey: output.script_pubkey,
-                }
+            .map(|output| bitcoin::TxOut {
+                value: Amount::from_sat(output.value),
+                script_pubkey: output.script_pubkey,
             })
             .collect::<Vec<_>>();
 
@@ -273,14 +258,12 @@ impl ObservedBitcoinTransaction {
             output: outputs,
         };
 
-        let materialized_input_value = transaction
-            .input
+        let materialized_input_value = transaction.input
             .iter()
             .map(|input| input.previous_output)
             .collect::<Vec<_>>();
 
-        let materialized_output_value = transaction
-            .output
+        let materialized_output_value = transaction.output
             .iter()
             .try_fold(0u64, |total, output| {
                 total.checked_add(output.value.to_sat())
@@ -292,27 +275,6 @@ impl ObservedBitcoinTransaction {
                 )
             })?;
 
-        for (index, input) in transaction.input.iter().enumerate() {
-            eprintln!(
-                "[bitcoin-materialized-input] tx_input={} outpoint={} null={} script_sig_bytes={} witness_items={} witness_bytes={}",
-                index,
-                input.previous_output,
-                input.previous_output.is_null(),
-                input.script_sig.len(),
-                input.witness.len(),
-                input.witness.iter().map(|item| item.len()).sum::<usize>(),
-            );
-        }
-
-        for (index, output) in transaction.output.iter().enumerate() {
-            eprintln!(
-                "[bitcoin-materialized-output] tx_output={} value_sat={} script_pubkey_bytes={}",
-                index,
-                output.value.to_sat(),
-                output.script_pubkey.len(),
-            );
-        }
-
         eprintln!(
             "[bitcoin-materialized] inputs={} outputs={} output_value_sat={} expected_settlement_value_sat={} input_outpoints={:?}",
             transaction.input.len(),
@@ -322,21 +284,23 @@ impl ObservedBitcoinTransaction {
             materialized_input_value,
         );
 
-        let mut observed = Self::from_transaction(
+        let observed = Self::from_transaction(
             transaction,
             source,
-        );
-
-        observed.fee = Some(fee);
+            &fee_payload,
+            direction,
+            submission,
+        )?;
 
         eprintln!(
-            "[bitcoin-materialized-complete] txid={} coinbase={} inputs={} outputs={} fee_sat={} weight={}",
+            "[bitcoin-materialized-complete] txid={} coinbase={} inputs={} outputs={} fee_sat={} replay_mass={} submission={}",
             observed.txid,
             observed.coinbase,
             observed.transaction.input.len(),
             observed.transaction.output.len(),
-            fee,
-            observed.transaction.weight().to_wu(),
+            observed.fee.unwrap_or_default(),
+            observed.weight.unwrap_or_default(),
+            submission,
         );
 
         Ok((observed, materialized_payload))
