@@ -1,3 +1,4 @@
+
 use qp_hd::{
     commands::qtm_open_manifold_until,
     protocol_id::LockedStructure,
@@ -9,14 +10,11 @@ use qtm_graph::graph::{
     scale::Scale,
 };
 use quantom_value::QuantPerm;
-
+use crate::broadcast::ElectrumBroadcastService;
 use crate::{
     bitcoinpayload::BitcoinPayload,
     bitcoinutxocollector::BitcoinUTXOCollector,
-    broadcast::{
-        ElectrumBroadcastService,
-        FinalizedSettlement,
-    },
+    broadcast::FinalizedSettlement,
     miner::{ActiveClip, Miner},
     observebitcointransaction::ObservedBitcoinTransaction,
     qpeventreceipt::EventReceipt,
@@ -24,7 +22,6 @@ use crate::{
     settlement::{SettlementEngine, SettlementError},
     sharedtypes::SettlementState,
 };
-
 
 pub struct BitcoinObservationPipeline {
     utxo: BitcoinUTXOCollector,
@@ -48,14 +45,12 @@ impl BitcoinObservationPipeline {
             ));
         }
 
-        let clip = ActiveClip {
-            substrate: substrate.to_owned(),
-            activation,
-        };
-
         Ok(Self {
             utxo: BitcoinUTXOCollector::new(),
-            miner: Miner::new(clip),
+            miner: Miner::new(ActiveClip {
+                substrate: substrate.to_owned(),
+                activation,
+            }),
             electrum: ElectrumBroadcastService::init(1024),
             chain: RenderState::window(substrate.to_owned()),
             activation,
@@ -93,57 +88,32 @@ impl BitcoinObservationPipeline {
         &mut self.chain
     }
 
-    #[inline(always)]
-    fn duplicate_depth(depth: &Depth) -> Depth {
-        let mut duplicate = Depth::new(depth.path());
-
-        for (position, identifier, retain) in depth.objects() {
-            duplicate.insert(
-                identifier,
-                position,
-                retain.clone(),
-            );
-        }
-
-        duplicate
-    }
-
     pub fn process(
         &mut self,
         substrate: &str,
         observed: ObservedBitcoinTransaction,
     ) -> Result<
-        Option<(
-    FinalizedSettlement,
-    BitcoinPayload,
-    u128,
-    [u8; 32],
-    Depth,
-   )>,
+        Option<(FinalizedSettlement, BitcoinPayload, u128, [u8; 32])>,
         SettlementError,
     > {
         if !self.chain.active {
             return Ok(None);
         }
 
-        let clip_activation = self
+        let activation = self
             .miner
             .clip(substrate)
             .map(|clip| clip.activation)
             .ok_or_else(|| {
                 SettlementError::Backend(format!(
-                    "no active miner clip for substrate={}",
-                    substrate,
+                    "no active miner clip for substrate={substrate}",
                 ))
             })?;
 
-        if clip_activation != self.activation {
+        if activation != self.activation {
             return Err(SettlementError::Backend(format!(
                 "miner clip activation mismatch: substrate={} requested={} active={} network={}",
-                substrate,
-                self.activation,
-                clip_activation,
-                self.network,
+                substrate, self.activation, activation, self.network,
             )));
         }
 
@@ -157,7 +127,7 @@ impl BitcoinObservationPipeline {
             .miner
             .submit(
                 substrate,
-                clip_activation,
+                activation,
                 pre_settlement.state,
                 &depth,
                 None,
@@ -165,10 +135,7 @@ impl BitcoinObservationPipeline {
             .map_err(|error| {
                 SettlementError::Backend(format!(
                     "miner submission failed: substrate={} activation={} network={}: {}",
-                    substrate,
-                    clip_activation,
-                    self.network,
-                    error,
+                    substrate, activation, self.network, error,
                 ))
             })?;
 
@@ -179,11 +146,7 @@ impl BitcoinObservationPipeline {
                 ))
             })?;
 
-        let direction = Miner::direction(
-            heritage,
-            Scale::Global,
-        );
-
+        let direction = Miner::direction(heritage, Scale::Global);
         let qtm = Qtm::commit(
             &direction.event.heritage.state,
             direction.event.net_work(),
@@ -199,7 +162,7 @@ impl BitcoinObservationPipeline {
         let event = QP44Event {
             heritage: direction.into_heritage(),
             qtm,
-            depth: Self::duplicate_depth(&depth),
+            depth,
         };
 
         let event_receipt = EventReceipt::new(
@@ -207,30 +170,27 @@ impl BitcoinObservationPipeline {
             SettlementState::Pending,
             locked,
         )
-        .map_err(|error| {
-            SettlementError::Backend(error.to_string())
-        })?;
+        .map_err(|error| SettlementError::Backend(error.to_string()))?;
 
-        let materialized = self.advance_materialized(
-            substrate,
-            bitcoin,
-            retained_mass,
-            event_receipt,
-            observed,
-            submission,
-        )?;
+        let Some((finalized, payload, retained_mass)) =
+            self.advance_materialized(
+                substrate,
+                bitcoin,
+                retained_mass,
+                event_receipt,
+                observed,
+                submission,
+            )?
+        else {
+            return Ok(None);
+        };
 
-        Ok(materialized.map(
-    |(finalized, payload, retained_mass)| {
-        (
+        Ok(Some((
             finalized,
             payload,
             retained_mass,
             commitment,
-            depth,
-        )
-    },
-       ))
+        )))
     }
 
     #[inline(always)]
@@ -252,11 +212,7 @@ impl BitcoinObservationPipeline {
         observed: ObservedBitcoinTransaction,
         submission: usize,
     ) -> Result<
-        Option<(
-            FinalizedSettlement,
-            BitcoinPayload,
-            u128,
-        )>,
+        Option<(FinalizedSettlement, BitcoinPayload, u128)>,
         SettlementError,
     > {
         if !self.chain.active {
@@ -271,10 +227,6 @@ impl BitcoinObservationPipeline {
                 submission,
             )?;
 
-        Ok(Some((
-            finalized,
-            payload,
-            retained_mass,
-        )))
+        Ok(Some((finalized, payload, retained_mass)))
     }
 }
