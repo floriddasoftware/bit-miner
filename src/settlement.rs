@@ -1,16 +1,21 @@
 
 use bitcoin::Transaction;
 use quantom_value::QuantPerm;
-use qtm_graph::graph::frame::Direction;
+use qtm_graph::graph::{
+    frame::Direction,
+    scale::Scale,
+};
 
-use crate::bitcoinpayload::BitcoinPayload;
-use crate::bitcoinreceipt::SettlementReceipt;
-use crate::broadcast::FinalizedSettlement;
-use crate::observebitcointransaction::ObservedBitcoinTransaction;
-use crate::qpeventreceipt::EventReceipt;
-use crate::sharedtypes::SettlementState;
+use crate::{
+    bitcoinpayload::BitcoinPayload,
+    bitcoinreceipt::SettlementReceipt,
+    broadcast::FinalizedSettlement,
+    observebitcointransaction::ObservedBitcoinTransaction,
+    qpeventreceipt::EventReceipt,
+    sharedtypes::SettlementState,
+};
 
-use qp_hd::qp44::{PQ44Event, QP44Event};
+use qp_hd::qp44::{PQ44Event, PQ44Event as _};
 
 use std::{
     error::Error,
@@ -26,10 +31,7 @@ pub enum SettlementError {
 }
 
 impl fmt::Display for SettlementError {
-    fn fmt(
-        &self,
-        f: &mut fmt::Formatter<'_>,
-    ) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Backend(msg) => write!(f, "{msg}"),
             Self::Unsupported(msg) => write!(f, "{msg}"),
@@ -105,9 +107,7 @@ impl SettlementEngine {
     }
 
     #[inline(always)]
-    pub fn new(
-        _substrate: impl Into<String>,
-    ) -> Self {
+    pub fn new(_substrate: impl Into<String>) -> Self {
         Self
     }
 
@@ -139,28 +139,53 @@ impl SettlementEngine {
     }
 
     #[inline(always)]
-    pub fn process<C>(
+    pub fn process(
         &self,
         receipt: EventReceipt,
         bitcoin: BitcoinPayload,
         observed: ObservedBitcoinTransaction,
-        cascade: C,
+        submission: usize,
     ) -> Result<(FinalizedSettlement, BitcoinPayload), SettlementError> {
-        let direction_heritage = &receipt.event.heritage;
-        let direction = Direction::from_heritage(direction_heritage);
-
         let receipt = Self::settle(receipt)?;
 
-        let post_settlement_manifold =
-            &receipt.event.heritage.state;
+        let SettlementReceipt {
+            event,
+            state,
+            locked,
+            script_pubkey,
+        } = receipt;
+
+        let PQ44Event {
+            heritage,
+            qtm,
+            depth,
+        } = event;
+
+        let direction =
+            Direction::from_heritage(heritage, Scale::Global);
+
+        let manifold = &direction.heritage().state;
 
         let (transaction, payload) = Self::materialize(
-            post_settlement_manifold,
+            manifold,
             bitcoin,
             observed,
             &direction,
-            cascade,
+            submission,
         )?;
+
+        let event = PQ44Event {
+            heritage: direction.into_heritage(),
+            qtm,
+            depth,
+        };
+
+        let receipt = SettlementReceipt::new(
+            event,
+            state,
+            locked,
+            script_pubkey,
+        );
 
         Ok((
             FinalizedSettlement::new(Some(receipt), transaction),
@@ -177,16 +202,13 @@ impl SettlementEngine {
     }
 
     #[inline(always)]
-    fn materialize<C>(
+    fn materialize(
         manifold: &QuantPerm,
         bitcoin: BitcoinPayload,
         observed: ObservedBitcoinTransaction,
         direction: &Direction,
-        submission: C,
-    ) -> Result<(Transaction, BitcoinPayload), SettlementError>
-    where
-        C: Into<usize>,
-    {
+        submission: usize,
+    ) -> Result<(Transaction, BitcoinPayload), SettlementError> {
         if bitcoin.inputs.is_empty() {
             return Err(SettlementError::Unsupported(
                 "cannot materialize a transaction without inputs",
@@ -199,7 +221,7 @@ impl SettlementEngine {
                 bitcoin,
                 observed.source,
                 direction,
-                submission.into(),
+                submission,
             )
             .map_err(|error| {
                 SettlementError::Backend(error.to_string())
