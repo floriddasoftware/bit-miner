@@ -31,7 +31,7 @@ impl BitcoinUTXOCollector {
         &mut self,
         observed: &ObservedBitcoinTransaction,
         manifold: &QuantPerm,
-    ) -> Result<(BitcoinPayload, u128), SettlementError> {
+    ) -> Result<(BitcoinPayload, u128, Depth), SettlementError> {
         let transaction = &observed.transaction;
 
         if transaction.compute_txid() != observed.txid {
@@ -104,9 +104,8 @@ impl BitcoinUTXOCollector {
             .collect::<Vec<BitcoinOutput>>();
 
         let retained_mass = Miner::deep(manifold, &depth).mass;
-
         let payload = BitcoinPayload::new(inputs, outputs);
 
-        Ok((payload, retained_mass))
+        Ok((payload, retained_mass, depth))
     }
 }
