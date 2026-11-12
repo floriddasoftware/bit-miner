@@ -6,14 +6,13 @@ use bitcoin::{
     Witness,
 };
 
-use qtm_graph::graph::frame::{
-    Depth,
-    Direction,
-};
+use qtm_graph::graph::frame::Depth;
+use quantom_value::QuantPerm;
 
 use crate::{
     bitcoinoutputqpinput::BitcoinOutput,
     bitcoinpayload::BitcoinPayload,
+    miner::Miner,
     observebitcointransaction::ObservedBitcoinTransaction,
     qpoutputsbitcoininput::BitcoinInput,
     settlement::SettlementError,
@@ -31,14 +30,13 @@ impl BitcoinUTXOCollector {
     pub fn collect(
         &mut self,
         observed: &ObservedBitcoinTransaction,
-        manifold: &quantom_value::QuantPerm,
+        manifold: &QuantPerm,
     ) -> Result<(BitcoinPayload, u128), SettlementError> {
         let transaction = &observed.transaction;
 
         if transaction.compute_txid() != observed.txid {
             return Err(SettlementError::Backend(
-                "observed transaction txid does not match its transaction"
-                    .into(),
+                "observed transaction txid does not match its transaction".into(),
             ));
         }
 
@@ -60,9 +58,6 @@ impl BitcoinUTXOCollector {
             ));
         }
 
-        // The settlement is a child transaction.
-        // Its inputs reference the observed parent's outputs,
-        // not the inputs previously consumed by the parent.
         let inputs = spendable_outputs
             .iter()
             .enumerate()
@@ -80,20 +75,13 @@ impl BitcoinUTXOCollector {
                     Sequence::MAX,
                 );
 
-                depth.insert(
-                    "input",
-                    position,
-                    retained,
-                );
-
+                depth.insert("input", position, retained);
                 input
             })
             .collect::<Vec<BitcoinInput>>();
 
         let output_offset = inputs.len();
 
-        // Materialize the child transaction's outputs in
-        // contiguous vout order.
         let outputs = spendable_outputs
             .iter()
             .enumerate()
@@ -115,13 +103,9 @@ impl BitcoinUTXOCollector {
             })
             .collect::<Vec<BitcoinOutput>>();
 
-        let retained_mass =
-            Direction::realize_depth(manifold, &depth).mass;
+        let retained_mass = Miner::deep(manifold, &depth).mass;
 
-        let payload = BitcoinPayload::new(
-            inputs,
-            outputs,
-        );
+        let payload = BitcoinPayload::new(inputs, outputs);
 
         Ok((payload, retained_mass))
     }
