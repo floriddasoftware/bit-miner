@@ -6,7 +6,8 @@ use std::{
 };
 
 use bitcoin::Transaction;
-use quantom_value::{PQ44Event, QuantPerm};
+use qp_hd::{PQ44Event, QP44Event};
+use quantom_value::QuantPerm;
 use qtm_graph::graph::{
     frame::Direction,
     scale::Scale,
@@ -20,10 +21,6 @@ use crate::{
     qpeventreceipt::EventReceipt,
     sharedtypes::SettlementState,
 };
-
-pub fn balance(event: PQ44Event) -> PQ44Event {
-    event
-}
 
 #[derive(Debug)]
 pub enum SettlementError {
@@ -64,17 +61,11 @@ impl SettlementEngine {
     fn settle(
         receipt: EventReceipt,
     ) -> Result<SettlementReceipt, SettlementError> {
-        let EventReceipt {
-            event,
-            locked,
-            ..
-        } = receipt;
+        let EventReceipt { event, locked, .. } = receipt;
 
         let script_pubkey =
             crate::bit_block::derive_script_pubkey(event.qtm.coordinate)
-                .map_err(|error| {
-                    SettlementError::Backend(error.to_string())
-                })?;
+                .map_err(|error| SettlementError::Backend(error.to_string()))?;
 
         Ok(SettlementReceipt::new(
             Self::balance(event),
@@ -120,24 +111,22 @@ impl SettlementEngine {
         block_height: u64,
         confirmations: u64,
     ) {
-        println!();
-        println!("==============================================");
-        println!("        BITCOIN CONFIRMATION UPDATE");
-        println!("==============================================");
-        println!("Chain        : Bitcoin");
-        println!("TXID         : {}", txid);
-        println!("Block Height : {}", block_height);
-        println!("Confirmations: {}", confirmations);
         println!(
-            "Finality     : {}",
+            "\n==============================================\n\
+             BITCOIN CONFIRMATION UPDATE\n\
+             ==============================================\n\
+             Chain        : Bitcoin\n\
+             TXID         : {txid}\n\
+             Block Height : {block_height}\n\
+             Confirmations: {confirmations}\n\
+             Finality     : {}\n\
+             ==============================================\n",
             if confirmations >= 6 {
                 "CONFIRMED"
             } else {
                 "WAITING"
             }
         );
-        println!("==============================================");
-        println!();
     }
 
     #[inline(always)]
@@ -163,9 +152,7 @@ impl SettlementEngine {
             depth,
         } = event;
 
-        let direction =
-            Direction::from_heritage(heritage, Scale::Global);
-
+        let direction = Direction::from_heritage(heritage, Scale::Global);
         let manifold = &direction.heritage().state;
 
         let (transaction, payload) = Self::materialize(
@@ -225,9 +212,7 @@ impl SettlementEngine {
                 direction,
                 submission,
             )
-            .map_err(|error| {
-                SettlementError::Backend(error.to_string())
-            })?;
+            .map_err(|error| SettlementError::Backend(error.to_string()))?;
 
         Ok((materialized.transaction, payload))
     }
