@@ -7,27 +7,18 @@ use std::{
 
 use bitcoin::Txid;
 use futures_util::{SinkExt, StreamExt};
-use qp_hd::commands::{
-    load_budget,
-    load_qtm_at_activation,
-    load_wirepackets,
-    persist_wirepackets,
-    qtm_open_manifold_until,
-};
+use qp_hd::commands::{load_budget, load_wirepackets, persist_wirepackets};
 use qp_hd::pathsregistry::CoinType;
-use qtm_graph::graph::{frame::Depth, Scale};
+use qtm_graph::graph::frame::Depth;
 use serde_json::Value;
 use tokio::net::TcpStream;
 use tokio_tungstenite::{
-    connect_async,
-    tungstenite::Message,
-    MaybeTlsStream,
-    WebSocketStream,
+    connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream,
 };
 
 use crate::{
     bitcoinpsbt::{BitcoinPsbt, PrevoutResolver},
-    broadcast::WirePacket,
+    broadcast::{FinalizedSettlement, WirePacket},
     observebitcointransaction::ObservedBitcoinTransaction,
     settlement::SettlementError,
     BitcoinObservationPipeline,
@@ -35,11 +26,14 @@ use crate::{
 
 pub type Blockchain = CoinType;
 
-pub type ObservationResult<T> =
-    Result<T, Box<dyn Error + Send + Sync>>;
+pub type ObservationResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 
-pub type PipelineOutcome =
-    Result<Option<(BitcoinPsbt, u128, [u8; 32], Depth)>, SettlementError>;
+/// Unsigned coordination result: canonical finalized settlement, unsigned PSBT
+/// for the wallet to sign, retained mass, QTM commitment, depth.
+pub type PipelineOutcome = Result<
+    Option<(FinalizedSettlement, BitcoinPsbt, u128, [u8; 32], Depth)>,
+    SettlementError,
+>;
 
 const MEMPOOL_SPACE_WS: &str = "wss://mempool.space/api/v1/ws";
 const MEMPOOL_SPACE_API: &str = "https://mempool.space/api";
@@ -101,17 +95,11 @@ impl MempoolSpaceStream {
         let (mut socket, _) = connect_async(MEMPOOL_SPACE_WS).await?;
 
         let subscription = match mode {
-            MempoolStreamMode::TransactionIds => {
-                r#"{"track-mempool-txids":true}"#
-            }
-            MempoolStreamMode::FullTransactions => {
-                r#"{"track-mempool":true}"#
-            }
+            MempoolStreamMode::TransactionIds => r#"{"track-mempool-txids":true}"#,
+            MempoolStreamMode::FullTransactions => r#"{"track-mempool":true}"#,
         };
 
-        socket
-            .send(Message::Text(subscription.into()))
-            .await?;
+        socket.send(Message::Text(subscription.into())).await?;
 
         Ok(Self {
             socket,
@@ -138,41 +126,31 @@ impl MempoolSpaceStream {
         self.skipped
     }
 
-    pub async fn next_observation(
-        &mut self,
-    ) -> ObservationResult<BitcoinObservation> {
+    pub async fn next_observation(&mut self) -> ObservationResult<BitcoinObservation> {
         loop {
             if let Some(observation) = self.pending.pop_front() {
                 return Ok(observation);
             }
-
             self.fill().await?;
         }
     }
 
     pub async fn stream<R: PrevoutResolver>(
-    &mut self,
-    substrate: &str,
-    pipeline: &mut BitcoinObservationPipeline,
-    resolver: &R,
-) -> ObservationResult<PipelineOutcome> {
-    let observation = self.next_observation().await?;
+        &mut self,
+        substrate: &str,
+        pipeline: &mut BitcoinObservationPipeline,
+        resolver: &R,
+    ) -> ObservationResult<PipelineOutcome> {
+        let BitcoinObservation::Transaction(transaction) =
+            self.next_observation().await?;
 
-    let BitcoinObservation::Transaction(transaction) = observation;
-
-    let observed =
-        ObservedBitcoinTransaction::from_observedtransaction(
+        let observed = ObservedBitcoinTransaction::from_observedtransaction(
             transaction,
             self.source,
         );
 
-    Ok(refresh(
-        pipeline,
-        substrate,
-        observed,
-        resolver,
-    ))
-}
+        Ok(refresh(pipeline, substrate, observed, resolver))
+    }
 
     async fn fill(&mut self) -> ObservationResult<()> {
         let message = self
@@ -184,12 +162,8 @@ impl MempoolSpaceStream {
         let value: Value = match message {
             Message::Text(text) => serde_json::from_str(text.as_ref())?,
             Message::Binary(bytes) => serde_json::from_slice(&bytes)?,
-            Message::Close(_) => {
-                return Err("Mempool.space WebSocket closed".into());
-            }
-            Message::Ping(_) | Message::Pong(_) | Message::Frame(_) => {
-                return Ok(());
-            }
+            Message::Close(_) => return Err("Mempool.space WebSocket closed".into()),
+            Message::Ping(_) | Message::Pong(_) | Message::Frame(_) => return Ok(()),
         };
 
         self.decode(&value).await
@@ -198,73 +172,51 @@ impl MempoolSpaceStream {
     async fn decode(&mut self, value: &Value) -> ObservationResult<()> {
         let mut ids = Vec::<String>::new();
         let mut seen = HashSet::<String>::new();
-
-        if let Some(entries) = added(value, "mempool-transactions") {
-            for entry in entries {
-                let txid = entry
-                    .get("txid")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned);
-
-                if let Some(hex_tx) = entry.get("hex").and_then(Value::as_str) {
-                    match decode_hex_transaction(hex_tx) {
-                        Ok(transaction) => {
-                            self.pending.push_back(
-                                BitcoinObservation::Transaction(transaction),
-                            );
-                            continue;
-                        }
-                        Err(_) => {
-                            self.skipped = self.skipped.saturating_add(1);
-                        }
-                    }
-                }
-
-                if let Some(txid) = txid {
-                    if seen.insert(txid.clone()) {
-                        ids.push(txid);
-                    }
-                }
+        let mut want = |id: &str| {
+            if seen.insert(id.to_owned()) {
+                ids.push(id.to_owned());
             }
-        }
+        };
 
-        if let Some(entries) = added(value, "mempool-txids") {
-            for txid in entries.iter().filter_map(Value::as_str) {
-                if seen.insert(txid.to_owned()) {
-                    ids.push(txid.to_owned());
-                }
-            }
-        }
-
-        if let Some(txid) = value.get("txid").and_then(Value::as_str) {
-            if seen.insert(txid.to_owned()) {
-                ids.push(txid.to_owned());
-            }
-        }
-
-        for txid in ids {
-            let txid = match Txid::from_str(&txid) {
-                Ok(txid) => txid,
-                Err(_) => {
-                    self.skipped = self.skipped.saturating_add(1);
+        for entry in added(value, "mempool-transactions").into_iter().flatten() {
+            match entry
+                .get("hex")
+                .and_then(Value::as_str)
+                .map(decode_hex_transaction)
+            {
+                Some(Ok(tx)) => {
+                    self.pending.push_back(BitcoinObservation::Transaction(tx));
                     continue;
                 }
+                Some(Err(_)) => self.skipped = self.skipped.saturating_add(1),
+                None => {}
+            }
+            if let Some(id) = entry.get("txid").and_then(Value::as_str) {
+                want(id);
+            }
+        }
+
+        for id in added(value, "mempool-txids")
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+        {
+            want(id);
+        }
+
+        if let Some(id) = value.get("txid").and_then(Value::as_str) {
+            want(id);
+        }
+
+        for id in ids {
+            let Ok(txid) = Txid::from_str(&id) else {
+                self.skipped = self.skipped.saturating_add(1);
+                continue;
             };
 
-            match fetch_decode(
-                &self.client,
-                format!("{MEMPOOL_SPACE_API}/tx/{txid}/raw"),
-            )
-            .await
-            {
-                Ok(transaction) => {
-                    self.pending.push_back(
-                        BitcoinObservation::Transaction(transaction),
-                    );
-                }
-                Err(_) => {
-                    self.skipped = self.skipped.saturating_add(1);
-                }
+            match fetch_decode(&self.client, format!("{MEMPOOL_SPACE_API}/tx/{txid}/raw")).await {
+                Ok(tx) => self.pending.push_back(BitcoinObservation::Transaction(tx)),
+                Err(_) => self.skipped = self.skipped.saturating_add(1),
             }
         }
 
@@ -278,30 +230,26 @@ fn added<'a>(value: &'a Value, key: &str) -> Option<&'a Vec<Value>> {
 }
 
 #[inline(always)]
-fn decode_hex_transaction(
-    hex_tx: &str,
-) -> ObservationResult<bitcoin::Transaction> {
-    let raw = hex::decode(hex_tx)?;
-    Ok(bitcoin::consensus::deserialize(&raw)?)
+fn decode_hex_transaction(hex_tx: &str) -> ObservationResult<bitcoin::Transaction> {
+    Ok(bitcoin::consensus::deserialize(&hex::decode(hex_tx)?)?)
 }
 
 async fn fetch_decode(
     client: &reqwest::Client,
     url: String,
 ) -> ObservationResult<bitcoin::Transaction> {
-    let raw = client
-        .get(url)
-        .send()
-        .await?
-        .error_for_status()?
-        .bytes()
-        .await?;
-
+    let raw = client.get(url).send().await?.error_for_status()?.bytes().await?;
     Ok(bitcoin::consensus::deserialize(&raw)?)
 }
 
-
 #[inline(always)]
+fn fail(message: impl Into<String>) -> SettlementError {
+    SettlementError::Backend(message.into())
+}
+
+/// Server-side flow: validate clip/budget, process, validate transaction against
+/// payload, persist wire packets, resolve parent outpoints, build unsigned PSBT.
+/// No private keys, no signing, no Electrum submission: the wallet signs.
 pub fn refresh<R: PrevoutResolver>(
     pipeline: &mut BitcoinObservationPipeline,
     substrate: &str,
@@ -312,84 +260,45 @@ pub fn refresh<R: PrevoutResolver>(
         .miner
         .clip(substrate)
         .map(|clip| clip.activation)
-        .ok_or_else(|| {
-            SettlementError::Backend(format!(
-                "no active miner clip: substrate={}",
-                substrate,
-            ))
-        })?;
+        .ok_or_else(|| fail(format!("no active miner clip: substrate={substrate}")))?;
 
     let network = pipeline.network().to_owned();
 
     if observed.source.activation != activation {
-        return Err(SettlementError::Backend(format!(
-            "observation activation mismatch: substrate={} observation={} active={}",
-            substrate,
+        return Err(fail(format!(
+            "observation activation mismatch: substrate={substrate} observation={} active={activation}",
             observed.source.activation,
-            activation,
         )));
     }
 
-    let observation_source = observed.source.clone();
+    let budget = load_budget(substrate, activation, &network).map_err(|e| {
+        fail(format!(
+            "budget load failed: substrate={substrate} activation={activation} network={network}: {e}"
+        ))
+    })?;
 
-    let budget = load_budget(substrate, activation, &network)
-        .map_err(|error| {
-            SettlementError::Backend(format!(
-                "budget load failed: substrate={} activation={} network={}: {}",
-                substrate, activation, network, error,
-            ))
-        })?;
-
-    let mut persisted_submission = 0u64;
-    let mut sequence_ended = false;
+    let mut persisted = 0u64;
+    let mut ended = false;
 
     for number in 1..=budget.max_events {
         match load_wirepackets(substrate, activation, number) {
             Ok(bytes) => {
-                if sequence_ended {
-                    return Err(SettlementError::Backend(format!(
-                        "submission sequence gap: substrate={} activation={} missing_before={}",
-                        substrate, activation, number,
+                if ended {
+                    return Err(fail(format!(
+                        "submission sequence gap: substrate={substrate} activation={activation} missing_before={number}"
                     )));
                 }
-
-                let packets = decode_wirepackets(&bytes)
-                    .map_err(|error| {
-                        SettlementError::Backend(format!(
-                            "persisted wirepacket decode failed: submission={}: {}",
-                            number, error,
-                        ))
-                    })?;
-
-                let commitment = packets
-                    .first()
-                    .map(|packet| packet.commitment)
-                    .ok_or_else(|| {
-                        SettlementError::Backend(format!(
-                            "empty persisted submission: {}",
-                            number,
-                        ))
-                    })?;
-
-                if packets
-                    .iter()
-                    .any(|packet| packet.commitment != commitment)
-                {
-                    return Err(SettlementError::Backend(format!(
-                        "mixed commitments in submission: {}",
-                        number,
-                    )));
+                let packets = decode_wirepackets(&bytes)?;
+                let commitment = packets[0].commitment;
+                if packets.iter().any(|p| p.commitment != commitment) {
+                    return Err(fail(format!("mixed commitments in submission: {number}")));
                 }
-
-                persisted_submission = number;
+                persisted = number;
             }
-            Err(error) if error.kind() == ErrorKind::NotFound => {
-                sequence_ended = true;
-            }
-            Err(error) => {
-                return Err(SettlementError::Backend(format!(
-                    "wirepacket load failed: substrate={} activation={} submission={}: {}",
-                    substrate, activation, number, error,
+            Err(e) if e.kind() == ErrorKind::NotFound => ended = true,
+            Err(e) => {
+                return Err(fail(format!(
+                    "wirepacket load failed: substrate={substrate} activation={activation} submission={number}: {e}"
                 )));
             }
         }
@@ -402,593 +311,198 @@ pub fn refresh<R: PrevoutResolver>(
         .copied()
         .unwrap_or(0);
 
-    if miner_submission > persisted_submission {
-        return Err(SettlementError::Backend(format!(
-            "miner counter exceeds persisted sequence: miner={} persisted={}",
-            miner_submission, persisted_submission,
+    if miner_submission > persisted {
+        return Err(fail(format!(
+            "miner counter exceeds persisted sequence: miner={miner_submission} persisted={persisted}"
         )));
     }
 
     pipeline
         .miner
         .submissions
-        .insert(substrate.to_owned(), persisted_submission);
+        .insert(substrate.to_owned(), persisted);
 
-    let submission = persisted_submission
+    let submission = persisted
         .checked_add(1)
+        .filter(|next| *next <= budget.max_events)
         .ok_or_else(|| {
-            SettlementError::Backend(
-                "submission sequence overflow".into(),
-            )
+            fail(format!(
+                "submission budget exhausted: substrate={substrate} activation={activation} network={network} max={}",
+                budget.max_events,
+            ))
         })?;
 
-    if submission > budget.max_events {
-        return Err(SettlementError::Backend(format!(
-            "submission budget exhausted: substrate={} activation={} network={} next={} max={}",
-            substrate, activation, network, submission, budget.max_events,
-        )));
-    }
-
-    let Some((
-        settlement,
-        materialized_payload,
-        retained_mass,
-        commitment,
-        depth,
-    )) = pipeline.process(substrate, observed)?
+    let Some((finalized, payload, retained_mass, commitment, depth)) =
+        pipeline.process(substrate, observed)?
     else {
         return Ok(None);
     };
 
-    let actual_submission = pipeline
+    let actual = pipeline
         .miner
         .submissions
         .get(substrate)
         .copied()
         .unwrap_or(0);
 
-    if actual_submission != submission {
-        return Err(SettlementError::Backend(format!(
-            "submission mismatch: expected={} actual={}",
-            submission, actual_submission,
+    if actual != submission {
+        return Err(fail(format!(
+            "submission mismatch: expected={submission} actual={actual}"
         )));
     }
 
-    let (
-        finalized,
-        materialized_payload,
-        previous_submission,
-        previous_commitment,
-        wire_packets,
-    ) = match settlement {
-        ObservationSettlement::Finalized(finalized) => {
-            let receipt = finalized
-                .receipt
-                .as_ref()
-                .ok_or_else(|| {
-                    SettlementError::Backend(
-                        "finalized settlement has no receipt".into(),
-                    )
-                })?;
+    let tx = &finalized.transaction;
 
-            let previous_submission =
-                receipt.event.heritage.state.activations();
-
-            let previous_commitment =
-                receipt.event.qtm.commitment;
-
-            if materialized_payload.inputs.len()
-                != finalized.transaction.input.len()
-            {
-                return Err(SettlementError::Backend(format!(
-                    "materialized input count mismatch: payload={} transaction={}",
-                    materialized_payload.inputs.len(),
-                    finalized.transaction.input.len(),
-                )));
-            }
-
-            for (input_index, (payload_input, transaction_input)) in
-                materialized_payload
-                    .inputs
-                    .iter()
-                    .zip(finalized.transaction.input.iter())
-                    .enumerate()
-            {
-                if payload_input.previous_output
-                    != transaction_input.previous_output
-                {
-                    return Err(SettlementError::Backend(format!(
-                        "materialized input outpoint mismatch: input={} payload={} transaction={}",
-                        input_index,
-                        payload_input.previous_output,
-                        transaction_input.previous_output,
-                    )));
-                }
-            }
-
-            if materialized_payload.outputs.len()
-                != finalized.transaction.output.len()
-            {
-                return Err(SettlementError::Backend(format!(
-                    "materialized output count mismatch: payload={} transaction={}",
-                    materialized_payload.outputs.len(),
-                    finalized.transaction.output.len(),
-                )));
-            }
-
-            for (index, (payload_output, transaction_output)) in
-                materialized_payload
-                    .outputs
-                    .iter()
-                    .zip(finalized.transaction.output.iter())
-                    .enumerate()
-            {
-                if payload_output.vout as usize != index
-                    || payload_output.value != transaction_output.value.to_sat()
-                    || payload_output.script_pubkey
-                        != transaction_output.script_pubkey
-                {
-                    return Err(SettlementError::Backend(format!(
-                        "materialized output mismatch: vout={}",
-                        index,
-                    )));
-                }
-            }
-
-            let generated_packets =
-                finalized.wire_packets(commitment);
-
-            if generated_packets.is_empty() {
-                return Err(SettlementError::Backend(
-                    "finalized settlement produced no wire packets".into(),
-                ));
-            }
-
-            let settlement_txid =
-                finalized.transaction.compute_txid();
-
-            let mut packet_bytes = Vec::new();
-
-            for packet in &generated_packets {
-                if packet.txid() != settlement_txid
-                    || packet.commitment != commitment
-                {
-                    return Err(SettlementError::Backend(
-                        "generated packet does not match finalized settlement"
-                            .into(),
-                    ));
-                }
-
-                let payload = packet.serialize();
-
-                if payload.is_empty() {
-                    return Err(SettlementError::Backend(
-                        "wire-packet serialization failed".into(),
-                    ));
-                }
-
-                let frame_len = u32::try_from(payload.len())
-                    .map_err(|error| {
-                        SettlementError::Backend(error.to_string())
-                    })?;
-
-                packet_bytes.extend_from_slice(
-                    &frame_len.to_be_bytes(),
-                );
-                packet_bytes.extend_from_slice(&payload);
-            }
-
-            persist_wirepackets(
-                substrate,
-                activation,
-                submission,
-                &packet_bytes,
-            )
-            .map_err(|error| {
-                SettlementError::Backend(format!(
-                    "wire-packet persistence failed: substrate={} activation={} submission={}: {}",
-                    substrate, activation, submission, error,
-                ))
-            })?;
-
-            let persisted_bytes =
-                load_wirepackets(substrate, activation, submission)
-                    .map_err(|error| {
-                        SettlementError::Backend(format!(
-                            "wire-packet reload failed: submission={}: {}",
-                            submission, error,
-                        ))
-                    })?;
-
-            let wire_packets =
-                decode_wirepackets(&persisted_bytes)?;
-
-            if wire_packets.len() != generated_packets.len()
-                || wire_packets.iter().any(|packet| {
-                    packet.txid() != settlement_txid
-                        || packet.commitment != commitment
-                })
-            {
-                return Err(SettlementError::Backend(
-                    "persisted packets differ from finalized submission"
-                        .into(),
-                ));
-            }
-
-            println!(
-                "qtm_wirepackets=persisted substrate={} activation={} network={} submission={} commitment={} packets={} bytes={}",
-                substrate,
-                activation,
-                network,
-                submission,
-                hex::encode(commitment),
-                wire_packets.len(),
-                persisted_bytes.len(),
-            );
-
-            (
-                finalized,
-                materialized_payload,
-                previous_submission,
-                previous_commitment,
-                wire_packets,
-            )
-        }
-
-        ObservationSettlement::Exile(event) => {
-            let previous_submission =
-                event.heritage.state.activations();
-
-            let previous_commitment = event.qtm.commitment;
-
-            let direction = Miner::direction(
-                event.heritage,
-                Scale::Global,
-            );
-
-            let manifold = &direction.heritage().state;
-
-            let (materialized, payload) =
-                ObservedBitcoinTransaction::new_transact(
-                    manifold,
-                    materialized_payload,
-                    observation_source,
-                    &direction,
-                    usize::try_from(submission).map_err(|error| {
-                        SettlementError::Backend(format!(
-                            "exile submission index exceeds supported range: {}",
-                            error,
-                        ))
-                    })?,
-                )
-                .map_err(|error| {
-                    SettlementError::Backend(format!(
-                        "exile transaction materialization failed: {}",
-                        error,
-                    ))
-                })?;
-
-            println!(
-                "bitcoin_exile=materialized submission={} txid={}",
-                submission,
-                materialized.txid,
-            );
-
-            (
-                FinalizedSettlement::new(
-                    None,
-                    materialized.transaction,
-                ),
-                payload,
-                previous_submission,
-                previous_commitment,
-                Vec::new(),
-            )
-        }
-    };
-
-    if materialized_payload.inputs.len()
-        != finalized.transaction.input.len()
-    {
-        return Err(SettlementError::Backend(format!(
-            "materialized input count mismatch: payload={} transaction={}",
-            materialized_payload.inputs.len(),
-            finalized.transaction.input.len(),
-        )));
-    }
-
-    for (input_index, (payload_input, transaction_input)) in
-        materialized_payload
+    if payload.inputs.len() != tx.input.len()
+        || payload
             .inputs
             .iter()
-            .zip(finalized.transaction.input.iter())
-            .enumerate()
+            .zip(&tx.input)
+            .any(|(p, t)| p.previous_output != t.previous_output)
     {
-        if payload_input.previous_output
-            != transaction_input.previous_output
-        {
-            return Err(SettlementError::Backend(format!(
-                "materialized input outpoint mismatch: input={} payload={} transaction={}",
-                input_index,
-                payload_input.previous_output,
-                transaction_input.previous_output,
-            )));
-        }
+        return Err(fail("materialized inputs do not match finalized transaction"));
     }
 
-    if materialized_payload.outputs.len()
-        != finalized.transaction.output.len()
+    if payload.outputs.len() != tx.output.len()
+        || payload.outputs.iter().zip(&tx.output).enumerate().any(|(i, (p, t))| {
+            p.vout as usize != i
+                || p.value != t.value.to_sat()
+                || p.script_pubkey != t.script_pubkey
+        })
     {
-        return Err(SettlementError::Backend(format!(
-            "materialized output count mismatch: payload={} transaction={}",
-            materialized_payload.outputs.len(),
-            finalized.transaction.output.len(),
-        )));
+        return Err(fail("materialized outputs do not match finalized transaction"));
     }
 
-    for (index, (payload_output, transaction_output)) in
-        materialized_payload
-            .outputs
-            .iter()
-            .zip(finalized.transaction.output.iter())
-            .enumerate()
-    {
-        if payload_output.vout as usize != index
-            || payload_output.value != transaction_output.value.to_sat()
-            || payload_output.script_pubkey
-                != transaction_output.script_pubkey
-        {
-            return Err(SettlementError::Backend(format!(
-                "materialized output mismatch: vout={}",
-                index,
-            )));
-        }
+    let generated = finalized.wire_packets(commitment);
+
+    if generated.is_empty() {
+        return Err(fail("finalized settlement produced no wire packets"));
     }
 
-    let mut resolved_prevouts =
-        Vec::with_capacity(finalized.transaction.input.len());
+    let txid = tx.compute_txid();
+    let matches = |p: &WirePacket| p.txid() == txid && p.commitment == commitment;
 
-    for (input_index, (payload_input, transaction_input)) in
-        materialized_payload
-            .inputs
-            .iter()
-            .zip(finalized.transaction.input.iter())
-            .enumerate()
-    {
-        let outpoint = &payload_input.previous_output;
+    if !generated.iter().all(matches) {
+        return Err(fail("generated packet does not match finalized settlement"));
+    }
 
-        if *outpoint != transaction_input.previous_output {
-            return Err(SettlementError::Backend(format!(
-                "materialized input outpoint mismatch: input={} payload={} transaction={}",
-                input_index,
-                outpoint,
-                transaction_input.previous_output,
-            )));
+    let mut packet_bytes = Vec::new();
+
+    for packet in &generated {
+        let body = packet.serialize();
+        if body.is_empty() {
+            return Err(fail("wire-packet serialization failed"));
         }
+        let len = u32::try_from(body.len()).map_err(|e| fail(e.to_string()))?;
+        packet_bytes.extend_from_slice(&len.to_be_bytes());
+        packet_bytes.extend_from_slice(&body);
+    }
+
+    persist_wirepackets(substrate, activation, submission, &packet_bytes).map_err(|e| {
+        fail(format!(
+            "wire-packet persistence failed: substrate={substrate} activation={activation} submission={submission}: {e}"
+        ))
+    })?;
+
+    let persisted_bytes = load_wirepackets(substrate, activation, submission)
+        .map_err(|e| fail(format!("wire-packet reload failed: submission={submission}: {e}")))?;
+
+    let wire_packets = decode_wirepackets(&persisted_bytes)?;
+
+    if wire_packets.len() != generated.len() || !wire_packets.iter().all(matches) {
+        return Err(fail("persisted packets differ from finalized submission"));
+    }
+
+    println!(
+        "qtm_wirepackets=persisted substrate={substrate} activation={activation} network={network} submission={submission} commitment={} packets={} bytes={}",
+        hex::encode(commitment),
+        wire_packets.len(),
+        persisted_bytes.len(),
+    );
+
+    let receipt = finalized
+        .receipt
+        .as_ref()
+        .ok_or_else(|| fail("finalized settlement has no receipt"))?;
+
+    let previous_submission = receipt.event.heritage.state.activations();
+    let previous_commitment = receipt.event.qtm.commitment;
+
+    let mut prevouts = Vec::with_capacity(tx.input.len());
+
+    for (i, input) in tx.input.iter().enumerate() {
+        let outpoint = &input.previous_output;
 
         let resolved = resolver
-            .resolve(
-                outpoint,
-                previous_submission,
-                previous_commitment,
-            )
-            .map_err(|error| {
-                SettlementError::Backend(format!(
-                    "outpoint resolution failed: input={} outpoint={} previous_submission={} commitment={}: {}",
-                    input_index,
-                    outpoint,
-                    previous_submission,
+            .resolve(outpoint, previous_submission, previous_commitment)
+            .map_err(|e| {
+                fail(format!(
+                    "outpoint resolution failed: input={i} outpoint={outpoint} previous_submission={previous_submission} commitment={}: {e}",
                     hex::encode(previous_commitment),
-                    error,
                 ))
             })?;
 
-        if resolved.outpoint != *outpoint {
-            return Err(SettlementError::Backend(format!(
-                "resolved prevout mismatch: input={} expected={} resolved={}",
-                input_index,
-                outpoint,
-                resolved.outpoint,
-            )));
-        }
-
-        if resolved.submission != previous_submission
+        if resolved.outpoint != *outpoint
+            || resolved.submission != previous_submission
             || resolved.commitment != previous_commitment
         {
-            return Err(SettlementError::Backend(format!(
-                "resolved prevout metadata mismatch: input={} expected_submission={} resolved_submission={} expected_commitment={} resolved_commitment={}",
-                input_index,
-                previous_submission,
-                resolved.submission,
-                hex::encode(previous_commitment),
-                hex::encode(resolved.commitment),
+            return Err(fail(format!(
+                "resolved prevout mismatch: input={i} outpoint={outpoint}"
             )));
         }
 
-        resolved_prevouts.push(resolved);
+        prevouts.push(resolved);
     }
 
-    let qtm = load_qtm_at_activation(substrate, activation);
-    let private_key = qtm.coordinate;
-    let heritage = qtm_open_manifold_until(substrate, activation);
-
-    let mut psbt =
-        BitcoinPsbt::from_settlement(finalized, resolved_prevouts)
-            .map_err(|error| {
-                SettlementError::Backend(format!(
-                    "Bitcoin PSBT preparation failed: {}",
-                    error,
-                ))
-            })?;
+    // BitcoinPsbt::from_settlement must borrow &FinalizedSettlement and hold only
+    // the unsigned PSBT and unsigned txid.
+    let psbt = BitcoinPsbt::from_settlement(&finalized, prevouts)
+        .map_err(|e| fail(format!("Bitcoin PSBT preparation failed: {e}")))?;
 
     println!(
-        "bitcoin_psbt=prepared submission={} unsigned_txid={}",
-        submission,
+        "bitcoin_psbt=prepared submission={submission} unsigned_txid={}",
         psbt.unsigned_txid(),
-    );
-
-    pipeline
-        .render_state_mut()
-        .frames(heritage, Scale::Global);
-
-    {
-        let direction = pipeline
-            .render_state()
-            .direction
-            .as_ref()
-            .ok_or_else(|| {
-                SettlementError::Backend(
-                    "QP render direction is unavailable for Bitcoin signing"
-                        .into(),
-                )
-            })?;
-
-        let manifold = &direction.heritage().state;
-
-        if materialized_payload.inputs.len()
-            != psbt.psbt.inputs.len()
-        {
-            return Err(SettlementError::Backend(format!(
-                "materialized payload input count mismatch: payload={} psbt={}",
-                materialized_payload.inputs.len(),
-                psbt.psbt.inputs.len(),
-            )));
-        }
-
-        for (input_index, mut bitcoin_input) in
-            materialized_payload.inputs.iter().cloned().enumerate()
-        {
-            psbt.sign_input(
-                &mut bitcoin_input,
-                manifold,
-                private_key,
-                input_index,
-            )
-            .map_err(|error| {
-                SettlementError::Backend(format!(
-                    "Bitcoin input signing failed: input={} outpoint={}: {}",
-                    input_index,
-                    bitcoin_input.previous_output,
-                    error,
-                ))
-            })?;
-        }
-    }
-
-    println!(
-        "bitcoin_psbt=signed submission={} inputs={}",
-        submission,
-        psbt.psbt.inputs.len(),
-    );
-
-    let signed_transaction = psbt
-        .psbt
-        .clone()
-        .extract_tx()
-        .map_err(|error| {
-            SettlementError::Backend(format!(
-                "signed PSBT extraction failed: {}",
-                error,
-            ))
-        })?;
-
-    let electrum_txid = pipeline
-        .electrum
-        .submit(signed_transaction)
-        .map_err(|error| {
-            SettlementError::Backend(format!(
-                "Electrum submission failed: {}",
-                error,
-            ))
-        })?;
-
-    println!(
-        "electrum=submitted submission={} txid={}",
-        submission,
-        electrum_txid,
     );
 
     for packet in wire_packets {
         pipeline.miner().broadcaster.publish(packet);
     }
 
-    Ok(Some((psbt, retained_mass, commitment, depth)))
+    Ok(Some((finalized, psbt, retained_mass, commitment, depth)))
 }
 
-#[inline(always)]
-fn decode_wirepackets(
-    bytes: &[u8],
-) -> Result<Vec<WirePacket>, SettlementError> {
-    if bytes.is_empty() {
-        return Err(SettlementError::Backend(
-            "persisted wire-packet file is empty".into(),
-        ));
-    }
-
-    let mut offset = 0usize;
+fn decode_wirepackets(bytes: &[u8]) -> Result<Vec<WirePacket>, SettlementError> {
+    let mut rest = bytes;
     let mut packets = Vec::new();
 
-    while offset < bytes.len() {
-        let header_end = offset.checked_add(4).ok_or_else(|| {
-            SettlementError::Backend(
-                "wire-packet frame offset overflow".into(),
-            )
-        })?;
+    while !rest.is_empty() {
+        let (head, tail) = rest
+            .split_at_checked(4)
+            .ok_or_else(|| fail("truncated wire-packet frame header"))?;
 
-        if header_end > bytes.len() {
-            return Err(SettlementError::Backend(
-                "truncated wire-packet frame header".into(),
-            ));
-        }
-
-        let frame_len = u32::from_be_bytes(
-            bytes[offset..header_end]
-                .try_into()
-                .map_err(|_| {
-                    SettlementError::Backend(
-                        "invalid wire-packet frame header".into(),
-                    )
-                })?,
+        let len = u32::from_be_bytes(
+            head.try_into()
+                .map_err(|_| fail("invalid wire-packet frame header"))?,
         ) as usize;
 
-        offset = header_end;
-
-        if !(WirePacket::MIN_SIZE..=WirePacket::MAX_SIZE).contains(&frame_len) {
-            return Err(SettlementError::Backend(format!(
-                "invalid wire-packet frame length={}",
-                frame_len,
-            )));
+        if !(WirePacket::MIN_SIZE..=WirePacket::MAX_SIZE).contains(&len) {
+            return Err(fail(format!("invalid wire-packet frame length={len}")));
         }
 
-        let frame_end = offset.checked_add(frame_len).ok_or_else(|| {
-            SettlementError::Backend(
-                "wire-packet frame length overflow".into(),
-            )
-        })?;
+        let (frame, tail) = tail
+            .split_at_checked(len)
+            .ok_or_else(|| fail("truncated wire-packet frame payload"))?;
 
-        if frame_end > bytes.len() {
-            return Err(SettlementError::Backend(
-                "truncated wire-packet frame payload".into(),
-            ));
-        }
+        packets.push(
+            WirePacket::deserialize(frame)
+                .map_err(|e| fail(format!("wire-packet deserialization failed: {e}")))?,
+        );
 
-        let packet =
-            WirePacket::deserialize(&bytes[offset..frame_end]).map_err(
-                |error| {
-                    SettlementError::Backend(format!(
-                        "wire-packet deserialization failed: {error}"
-                    ))
-                },
-            )?;
-
-        packets.push(packet);
-        offset = frame_end;
+        rest = tail;
     }
 
     if packets.is_empty() {
-        return Err(SettlementError::Backend(
-            "persisted wire-packet file contains no packets".into(),
-        ));
+        return Err(fail("persisted wire-packet file is empty"));
     }
 
     Ok(packets)
