@@ -79,13 +79,8 @@ impl Miner {
             .unwrap_or(0)
     }
 
-    // -------------------------------------------------------------------------
-    // DIRECTION DELEGATION
-    // -------------------------------------------------------------------------
-
     #[inline(always)]
     pub fn realize_depth(
-        &self,
         manifold: &QuantPerm,
         depth: &Depth,
     ) -> Retain {
@@ -97,11 +92,10 @@ impl Miner {
 
     #[inline(always)]
     pub fn deep(
-        &self,
         manifold: &QuantPerm,
         depth: &Depth,
     ) -> Retain {
-        self.realize_depth(
+        Self::realize_depth(
             manifold,
             depth,
         )
@@ -109,7 +103,6 @@ impl Miner {
 
     #[inline(always)]
     pub fn transit(
-        &self,
         manifold: QuantPerm,
         depth: &Depth,
         provided_seed: Option<&[u8]>,
@@ -123,7 +116,6 @@ impl Miner {
 
     #[inline(always)]
     pub fn exile(
-        &self,
         manifold: QuantPerm,
     ) -> Heritage {
         Direction::exile(manifold)
@@ -131,7 +123,6 @@ impl Miner {
 
     #[inline(always)]
     pub fn direction(
-        &self,
         heritage: Heritage,
         scale: Scale,
     ) -> Direction {
@@ -140,10 +131,6 @@ impl Miner {
             scale,
         )
     }
-
-    // -------------------------------------------------------------------------
-    // SUBMISSION
-    // -------------------------------------------------------------------------
 
     pub fn submit(
         &mut self,
@@ -170,7 +157,7 @@ impl Miner {
             )));
         }
 
-        let heritage = self.transit(
+        let heritage = Self::transit(
             manifold,
             depth,
             provided_seed,
