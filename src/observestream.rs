@@ -151,20 +151,28 @@ impl MempoolSpaceStream {
     }
 
     pub async fn stream<R: PrevoutResolver>(
-        &mut self,
-        substrate: &str,
-        pipeline: &mut BitcoinObservationPipeline,
-        resolver: &R,
-    ) -> ObservationResult<PipelineOutcome> {
-        let observation = self.next_observation().await?;
+    &mut self,
+    substrate: &str,
+    pipeline: &mut BitcoinObservationPipeline,
+    resolver: &R,
+) -> ObservationResult<PipelineOutcome> {
+    let observation = self.next_observation().await?;
 
-        let BitcoinObservation::Transaction(transaction) = observation;
+    let BitcoinObservation::Transaction(transaction) = observation;
 
-        let observed =
-            ObservedBitcoinTransaction::from_transaction(transaction, self.source);
+    let observed =
+        ObservedBitcoinTransaction::from_observedtransaction(
+            transaction,
+            self.source,
+        );
 
-        Ok(refresh(pipeline, substrate, observed, resolver))
-    }
+    Ok(refresh(
+        pipeline,
+        substrate,
+        observed,
+        resolver,
+    ))
+}
 
     async fn fill(&mut self) -> ObservationResult<()> {
         let message = self
