@@ -177,7 +177,7 @@ impl BitcoinPsbt {
     /// Each previous output is attached exclusively through witness_utxo.
     #[inline]
     pub fn from_settlement(
-        finalized: FinalizedSettlement,
+        finalized: &FinalizedSettlement,
         resolved_prevouts: Vec<ResolvedPrevout>,
     ) -> BitcoinPsbtResult<Self> {
         let FinalizedSettlement {
