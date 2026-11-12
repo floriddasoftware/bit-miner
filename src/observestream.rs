@@ -24,11 +24,8 @@ use crate::{
 };
 
 pub type Blockchain = CoinType;
-
 pub type ObservationResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 
-/// Unsigned coordination result: canonical finalized settlement, unsigned PSBT
-/// for the wallet to sign, retained mass, QTM commitment, depth.
 pub type PipelineOutcome = Result<
     Option<(FinalizedSettlement, BitcoinPsbt, u128, [u8; 32])>,
     SettlementError,
@@ -92,10 +89,13 @@ impl MempoolSpaceStream {
         mode: MempoolStreamMode,
     ) -> ObservationResult<Self> {
         let (mut socket, _) = connect_async(MEMPOOL_SPACE_WS).await?;
-
         let subscription = match mode {
-            MempoolStreamMode::TransactionIds => r#"{"track-mempool-txids":true}"#,
-            MempoolStreamMode::FullTransactions => r#"{"track-mempool":true}"#,
+            MempoolStreamMode::TransactionIds => {
+                r#"{"track-mempool-txids":true}"#
+            }
+            MempoolStreamMode::FullTransactions => {
+                r#"{"track-mempool":true}"#
+            }
         };
 
         socket.send(Message::Text(subscription.into())).await?;
@@ -130,6 +130,7 @@ impl MempoolSpaceStream {
             if let Some(observation) = self.pending.pop_front() {
                 return Ok(observation);
             }
+
             self.fill().await?;
         }
     }
@@ -171,6 +172,7 @@ impl MempoolSpaceStream {
     async fn decode(&mut self, value: &Value) -> ObservationResult<()> {
         let mut ids = Vec::<String>::new();
         let mut seen = HashSet::<String>::new();
+
         let mut want = |id: &str| {
             if seen.insert(id.to_owned()) {
                 ids.push(id.to_owned());
@@ -190,6 +192,7 @@ impl MempoolSpaceStream {
                 Some(Err(_)) => self.skipped = self.skipped.saturating_add(1),
                 None => {}
             }
+
             if let Some(id) = entry.get("txid").and_then(Value::as_str) {
                 want(id);
             }
@@ -213,7 +216,12 @@ impl MempoolSpaceStream {
                 continue;
             };
 
-            match fetch_decode(&self.client, format!("{MEMPOOL_SPACE_API}/tx/{txid}/raw")).await {
+            match fetch_decode(
+                &self.client,
+                format!("{MEMPOOL_SPACE_API}/tx/{txid}/raw"),
+            )
+            .await
+            {
                 Ok(tx) => self.pending.push_back(BitcoinObservation::Transaction(tx)),
                 Err(_) => self.skipped = self.skipped.saturating_add(1),
             }
@@ -229,7 +237,9 @@ fn added<'a>(value: &'a Value, key: &str) -> Option<&'a Vec<Value>> {
 }
 
 #[inline(always)]
-fn decode_hex_transaction(hex_tx: &str) -> ObservationResult<bitcoin::Transaction> {
+fn decode_hex_transaction(
+    hex_tx: &str,
+) -> ObservationResult<bitcoin::Transaction> {
     Ok(bitcoin::consensus::deserialize(&hex::decode(hex_tx)?)?)
 }
 
@@ -237,7 +247,14 @@ async fn fetch_decode(
     client: &reqwest::Client,
     url: String,
 ) -> ObservationResult<bitcoin::Transaction> {
-    let raw = client.get(url).send().await?.error_for_status()?.bytes().await?;
+    let raw = client
+        .get(url)
+        .send()
+        .await?
+        .error_for_status()?
+        .bytes()
+        .await?;
+
     Ok(bitcoin::consensus::deserialize(&raw)?)
 }
 
@@ -246,9 +263,9 @@ fn fail(message: impl Into<String>) -> SettlementError {
     SettlementError::Backend(message.into())
 }
 
-/// Server-side flow: validate clip/budget, process, validate transaction against
-/// payload, persist wire packets, resolve parent outpoints, build unsigned PSBT.
-/// No private keys, no signing, no Electrum submission: the wallet signs.
+/// Validates the clip and budget, processes the observation, persists and
+/// verifies wire packets, resolves parent outpoints, and builds an unsigned PSBT.
+/// The wallet client owns signing and broadcast.
 pub fn refresh<R: PrevoutResolver>(
     pipeline: &mut BitcoinObservationPipeline,
     substrate: &str,
@@ -287,11 +304,16 @@ pub fn refresh<R: PrevoutResolver>(
                         "submission sequence gap: substrate={substrate} activation={activation} missing_before={number}"
                     )));
                 }
+
                 let packets = decode_wirepackets(&bytes)?;
                 let commitment = packets[0].commitment;
+
                 if packets.iter().any(|p| p.commitment != commitment) {
-                    return Err(fail(format!("mixed commitments in submission: {number}")));
+                    return Err(fail(format!(
+                        "mixed commitments in submission: {number}"
+                    )));
                 }
+
                 persisted = number;
             }
             Err(e) if e.kind() == ErrorKind::NotFound => ended = true,
@@ -303,19 +325,7 @@ pub fn refresh<R: PrevoutResolver>(
         }
     }
 
-    let miner_submission = pipeline
-        .miner
-        .submissions
-        .get(substrate)
-        .copied()
-        .unwrap_or(0);
-
-    if miner_submission > persisted {
-        return Err(fail(format!(
-            "miner counter exceeds persisted sequence: miner={miner_submission} persisted={persisted}"
-        )));
-    }
-
+    // Persisted wire packets are authoritative; repair the in-memory counter.
     pipeline
         .miner
         .submissions
@@ -332,23 +342,10 @@ pub fn refresh<R: PrevoutResolver>(
         })?;
 
     let Some((finalized, payload, retained_mass, commitment)) =
-    pipeline.process(substrate, observed)?
-else {
-    return Ok(None);
-};
-
-    let actual = pipeline
-        .miner
-        .submissions
-        .get(substrate)
-        .copied()
-        .unwrap_or(0);
-
-    if actual != submission {
-        return Err(fail(format!(
-            "submission mismatch: expected={submission} actual={actual}"
-        )));
-    }
+        pipeline.process(substrate, observed)?
+    else {
+        return Ok(None);
+    };
 
     let tx = &finalized.transaction;
 
@@ -359,17 +356,26 @@ else {
             .zip(&tx.input)
             .any(|(p, t)| p.previous_output != t.previous_output)
     {
-        return Err(fail("materialized inputs do not match finalized transaction"));
+        return Err(fail(
+            "materialized inputs do not match finalized transaction",
+        ));
     }
 
     if payload.outputs.len() != tx.output.len()
-        || payload.outputs.iter().zip(&tx.output).enumerate().any(|(i, (p, t))| {
-            p.vout as usize != i
-                || p.value != t.value.to_sat()
-                || p.script_pubkey != t.script_pubkey
-        })
+        || payload
+            .outputs
+            .iter()
+            .zip(&tx.output)
+            .enumerate()
+            .any(|(i, (p, t))| {
+                p.vout as usize != i
+                    || p.value != t.value.to_sat()
+                    || p.script_pubkey != t.script_pubkey
+            })
     {
-        return Err(fail("materialized outputs do not match finalized transaction"));
+        return Err(fail(
+            "materialized outputs do not match finalized transaction",
+        ));
     }
 
     let generated = finalized.wire_packets(commitment);
@@ -389,28 +395,41 @@ else {
 
     for packet in &generated {
         let body = packet.serialize();
+
         if body.is_empty() {
             return Err(fail("wire-packet serialization failed"));
         }
+
         let len = u32::try_from(body.len()).map_err(|e| fail(e.to_string()))?;
         packet_bytes.extend_from_slice(&len.to_be_bytes());
         packet_bytes.extend_from_slice(&body);
     }
 
-    persist_wirepackets(substrate, activation, submission, &packet_bytes).map_err(|e| {
-        fail(format!(
-            "wire-packet persistence failed: substrate={substrate} activation={activation} submission={submission}: {e}"
-        ))
-    })?;
+    persist_wirepackets(substrate, activation, submission, &packet_bytes)
+        .map_err(|e| {
+            fail(format!(
+                "wire-packet persistence failed: substrate={substrate} activation={activation} submission={submission}: {e}"
+            ))
+        })?;
 
     let persisted_bytes = load_wirepackets(substrate, activation, submission)
-        .map_err(|e| fail(format!("wire-packet reload failed: submission={submission}: {e}")))?;
+        .map_err(|e| {
+            fail(format!(
+                "wire-packet reload failed: submission={submission}: {e}"
+            ))
+        })?;
 
     let wire_packets = decode_wirepackets(&persisted_bytes)?;
 
     if wire_packets.len() != generated.len() || !wire_packets.iter().all(matches) {
         return Err(fail("persisted packets differ from finalized submission"));
     }
+
+    // Commit only after persistence and verification succeed.
+    pipeline
+        .miner
+        .submissions
+        .insert(substrate.to_owned(), submission);
 
     println!(
         "qtm_wirepackets=persisted substrate={substrate} activation={activation} network={network} submission={submission} commitment={} packets={} bytes={}",
@@ -426,7 +445,6 @@ else {
 
     let previous_submission = receipt.event.heritage.state.activations();
     let previous_commitment = receipt.event.qtm.commitment;
-
     let mut prevouts = Vec::with_capacity(tx.input.len());
 
     for (i, input) in tx.input.iter().enumerate() {
@@ -453,8 +471,6 @@ else {
         prevouts.push(resolved);
     }
 
-    // BitcoinPsbt::from_settlement must borrow &FinalizedSettlement and hold only
-    // the unsigned PSBT and unsigned txid.
     let psbt = BitcoinPsbt::from_settlement(&finalized, prevouts)
         .map_err(|e| fail(format!("Bitcoin PSBT preparation failed: {e}")))?;
 
@@ -485,7 +501,9 @@ fn decode_wirepackets(bytes: &[u8]) -> Result<Vec<WirePacket>, SettlementError> 
         ) as usize;
 
         if !(WirePacket::MIN_SIZE..=WirePacket::MAX_SIZE).contains(&len) {
-            return Err(fail(format!("invalid wire-packet frame length={len}")));
+            return Err(fail(format!(
+                "invalid wire-packet frame length={len}"
+            )));
         }
 
         let (frame, tail) = tail
