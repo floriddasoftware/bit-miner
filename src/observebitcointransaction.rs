@@ -1,3 +1,4 @@
+
 use bitcoin::{
     Amount,
     TxIn,
@@ -47,7 +48,29 @@ impl ObservedBitcoinTransaction {
     }
 
     #[inline(always)]
-    pub fn from_transaction(
+    pub fn from_observedtransaction(
+        transaction: bitcoin::Transaction,
+        source: BitcoinObservationSource,
+    ) -> Self {
+        let txid = transaction.compute_txid();
+        let coinbase = Self::is_coinbase(&transaction);
+
+        Self {
+            observation: None,
+            source,
+            txid,
+            transaction,
+            coinbase,
+            fee: None,
+            weight: None,
+            depends: None,
+            template_index: None,
+            transition_delta: None,
+        }
+    }
+
+    #[inline(always)]
+    pub fn from_settlementtransaction(
         transaction: bitcoin::Transaction,
         source: BitcoinObservationSource,
         payload: &BitcoinPayload,
@@ -65,7 +88,9 @@ impl ObservedBitcoinTransaction {
         .map_err(|error| {
             std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
-                format!("Payload replay mass exceeds supported range: {error}"),
+                format!(
+                    "Payload replay mass exceeds supported range: {error}"
+                ),
             )
         })?;
 
@@ -78,7 +103,9 @@ impl ObservedBitcoinTransaction {
         .map_err(|error| {
             std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
-                format!("Retained fee quantity exceeds supported range: {error}"),
+                format!(
+                    "Retained fee quantity exceeds supported range: {error}"
+                ),
             )
         })?;
 
@@ -134,7 +161,9 @@ impl ObservedBitcoinTransaction {
         .map_err(|error| {
             std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
-                format!("Retained fee quantity exceeds supported range: {error}"),
+                format!(
+                    "Retained fee quantity exceeds supported range: {error}"
+                ),
             )
         })?;
 
@@ -283,7 +312,7 @@ impl ObservedBitcoinTransaction {
             materialized_input_value,
         );
 
-        let observed = Self::from_transaction(
+        let observed = Self::from_settlementtransaction(
             transaction,
             source,
             &fee_payload,
