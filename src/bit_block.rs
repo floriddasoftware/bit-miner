@@ -186,6 +186,8 @@ pub fn qtm_master_fingerprint(
     activation: u64,
     network: NetworkKind,
 ) -> BitBlockResult<Fingerprint> {
+    let secp = secp256k1();
+
     let master = qtm_xpriv(
         coordinate,
         commitment,
@@ -193,7 +195,7 @@ pub fn qtm_master_fingerprint(
         network,
     )?;
 
-    Ok(master.fingerprint())
+    Ok(master.fingerprint(&secp))
 }
 
 /// Return the QTM master Xpub.
@@ -302,7 +304,7 @@ pub fn qtm_master_keys(
     Ok(QtmMasterKeys {
         activation,
         depth: master.depth,
-        fingerprint: master.fingerprint().to_string(),
+fingerprint: master.fingerprint(&secp).to_string(),
         xpriv: master.to_string(),
         xpub: master_xpub.to_string(),
         zpub: xpub_to_zpub(&master_xpub),
