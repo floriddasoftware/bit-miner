@@ -11,6 +11,7 @@ use qtm_graph::graph::{
 };
 use quantom_value::QuantPerm;
 use crate::broadcast::ElectrumBroadcastService;
+
 use crate::{
     bitcoinpayload::BitcoinPayload,
     bitcoinutxocollector::BitcoinUTXOCollector,
@@ -202,6 +203,7 @@ impl BitcoinObservationPipeline {
         self.utxo.collect(observed, manifold)
     }
 
+   
     #[inline(always)]
     pub fn advance_materialized(
         &mut self,
@@ -226,6 +228,28 @@ impl BitcoinObservationPipeline {
                 observed,
                 submission,
             )?;
+
+        let receipt = finalized.receipt.as_ref().ok_or_else(|| {
+            SettlementError::Backend(
+                "finalized settlement has no event receipt".into(),
+            )
+        })?;
+
+        let activation = receipt.event.heritage.state.activations();
+
+        let submission_id = u64::try_from(submission)
+            .map_err(|error| {
+                SettlementError::Backend(format!(
+                    "submission index exceeds supported range: {error}",
+                ))
+            })?;
+
+        qp_hd::commands::persist_submission(
+            substrate,
+            activation,
+            submission_id,
+            &receipt.event,
+        )?;
 
         Ok(Some((finalized, payload, retained_mass)))
     }
