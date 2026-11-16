@@ -306,7 +306,7 @@ pub fn refresh<R: PrevoutResolver>(
     let mut parents = ParentIndex::new();
 
     for number in 1..=budget.max_events {
-        match load_wirepackets(substrate, activation, number) {
+        match load_wirepackets(substrate, activation, number, &network) {
             Ok(bytes) => {
                 if ended {
                     return Err(fail(format!(
@@ -422,14 +422,19 @@ pub fn refresh<R: PrevoutResolver>(
         packet_bytes.extend_from_slice(&body);
     }
 
-    persist_wirepackets(substrate, activation, submission, &packet_bytes)
-        .map_err(|e| {
+    persist_wirepackets(
+    substrate,
+    activation,
+    submission,
+    &network,
+    &packet_bytes,).map_err(|e| {
             fail(format!(
                 "wire-packet persistence failed: substrate={substrate} activation={activation} submission={submission}: {e}"
             ))
         })?;
 
-    let persisted_bytes = load_wirepackets(substrate, activation, submission)
+let persisted_bytes =
+    load_wirepackets(substrate, activation, submission, &network)
         .map_err(|e| {
             fail(format!(
                 "wire-packet reload failed: submission={submission}: {e}"
