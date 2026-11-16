@@ -236,7 +236,7 @@ pub fn advance_materialized(
         )
     })?;
 
-    let activation = receipt.event.heritage.state.activations();
+    let activation = self.activation;
 
     let submission_id = u64::try_from(submission)
         .map_err(|error| {
