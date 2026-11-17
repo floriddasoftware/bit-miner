@@ -80,6 +80,15 @@ impl BitcoinObservationPipeline {
     }
 
     #[inline(always)]
+    pub fn submissions(&self) -> Vec<u64> {
+        let Some(clip) = self.miner.clips().first() else {
+            return Vec::new();
+        };
+
+        self.miner.submissions_for(&clip.substrate)
+    }
+
+    #[inline(always)]
     pub fn render_state(&self) -> &RenderState {
         &self.chain
     }
@@ -203,62 +212,64 @@ impl BitcoinObservationPipeline {
         self.utxo.collect(observed, manifold)
     }
 
-   
-    
-#[inline(always)]
-pub fn advance_materialized(
-    &mut self,
-    substrate: &str,
-    bitcoin: BitcoinPayload,
-    retained_mass: u128,
-    event_receipt: EventReceipt,
-    observed: ObservedBitcoinTransaction,
-    submission: usize,
-) -> Result<
-    Option<(FinalizedSettlement, BitcoinPayload, u128)>,
-    SettlementError,
-> {
-    if !self.chain.active {
-        return Ok(None);
-    }
+    #[inline(always)]
+    pub fn advance_materialized(
+        &mut self,
+        substrate: &str,
+        bitcoin: BitcoinPayload,
+        retained_mass: u128,
+        event_receipt: EventReceipt,
+        observed: ObservedBitcoinTransaction,
+        submission: usize,
+    ) -> Result<
+        Option<(FinalizedSettlement, BitcoinPayload, u128)>,
+        SettlementError,
+    > {
+        if !self.chain.active {
+            return Ok(None);
+        }
 
-    let (finalized, payload) =
-        SettlementEngine::new(substrate).process(
-            event_receipt,
-            bitcoin,
-            observed,
-            submission,
-        )?;
+        let (finalized, payload) =
+            SettlementEngine::new(substrate).process(
+                event_receipt,
+                bitcoin,
+                observed,
+                submission,
+            )?;
 
-    let receipt = finalized.receipt.as_ref().ok_or_else(|| {
-        SettlementError::Backend(
-            "finalized settlement has no event receipt".into(),
-        )
-    })?;
-
-    let activation = receipt.event.heritage.state.activations();
-
-    let submission_id = u64::try_from(submission)
-        .map_err(|error| {
-            SettlementError::Backend(format!(
-                "submission index exceeds supported range: {error}",
-            ))
+        let receipt = finalized.receipt.as_ref().ok_or_else(|| {
+            SettlementError::Backend(
+                "finalized settlement has no event receipt".into(),
+            )
         })?;
 
-    qp_hd::commands::persist_submission(
-        substrate,
-        activation,
-        submission_id,
-        &receipt.event,
-    )?;
+        let activation = receipt.event.heritage.state.activations();
 
-    qp_hd::commands::persist_submission_network(
-        substrate,
-        activation,
-        submission_id,
-        &self.network,
-    )?;
+        let submission_id = u64::try_from(submission)
+            .map_err(|error| {
+                SettlementError::Backend(format!(
+                    "submission index exceeds supported range: {error}",
+                ))
+            })?;
 
-    Ok(Some((finalized, payload, retained_mass)))
-}
+        qp_hd::commands::persist_submission(
+            substrate,
+            activation,
+            submission_id,
+            &receipt.event,
+        )?;
+
+        qp_hd::commands::persist_submission_network(
+            substrate,
+            activation,
+            submission_id,
+            &self.network,
+        )?;
+
+        self.miner
+            .submissions
+            .insert(substrate.to_owned(), submission_id);
+
+        Ok(Some((finalized, payload, retained_mass)))
+    }
 }
