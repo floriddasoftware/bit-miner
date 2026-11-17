@@ -10,6 +10,7 @@ use qtm_graph::graph::{
     scale::Scale,
 };
 use quantom_value::QuantPerm;
+
 use crate::broadcast::ElectrumBroadcastService;
 
 use crate::{
@@ -40,6 +41,12 @@ impl BitcoinObservationPipeline {
         substrate: &str,
         network: &str,
     ) -> Result<Self, SettlementError> {
+        if activation == 0 {
+            return Err(SettlementError::Backend(
+                "Bitcoin observation pipeline requires an activation ID".into(),
+            ));
+        }
+
         if network.trim().is_empty() {
             return Err(SettlementError::Backend(
                 "Bitcoin observation pipeline requires a network ID".into(),
@@ -80,15 +87,6 @@ impl BitcoinObservationPipeline {
     }
 
     #[inline(always)]
-    pub fn submissions(&self) -> Vec<u64> {
-        let Some(clip) = self.miner.clips().first() else {
-            return Vec::new();
-        };
-
-        self.miner.submissions_for(&clip.substrate)
-    }
-
-    #[inline(always)]
     pub fn render_state(&self) -> &RenderState {
         &self.chain
     }
@@ -123,7 +121,10 @@ impl BitcoinObservationPipeline {
         if activation != self.activation {
             return Err(SettlementError::Backend(format!(
                 "miner clip activation mismatch: substrate={} requested={} active={} network={}",
-                substrate, self.activation, activation, self.network,
+                substrate,
+                self.activation,
+                activation,
+                self.network,
             )));
         }
 
@@ -131,9 +132,12 @@ impl BitcoinObservationPipeline {
             qtm_open_manifold_until(substrate, self.activation);
 
         let (bitcoin, retained_mass, depth) =
-            self.bitcoin_payload(&observed, &pre_settlement.state)?;
+            self.bitcoin_payload(
+                &observed,
+                &pre_settlement.state,
+            )?;
 
-        let (heritage, submission_count) = self
+        let heritage = self
             .miner
             .submit(
                 substrate,
@@ -144,19 +148,19 @@ impl BitcoinObservationPipeline {
             )
             .map_err(|error| {
                 SettlementError::Backend(format!(
-                    "miner submission failed: substrate={} activation={} network={}: {}",
-                    substrate, activation, self.network, error,
+                    "miner transit failed: substrate={} activation={} network={}: {}",
+                    substrate,
+                    activation,
+                    self.network,
+                    error,
                 ))
             })?;
 
-        let submission = usize::try_from(submission_count)
-            .map_err(|error| {
-                SettlementError::Backend(format!(
-                    "submission index exceeds supported range: {error}",
-                ))
-            })?;
+        let direction = Miner::direction(
+            heritage,
+            Scale::Global,
+        );
 
-        let direction = Miner::direction(heritage, Scale::Global);
         let qtm = Qtm::commit(
             &direction.event.heritage.state,
             direction.event.net_work(),
@@ -180,7 +184,9 @@ impl BitcoinObservationPipeline {
             SettlementState::Pending,
             locked,
         )
-        .map_err(|error| SettlementError::Backend(error.to_string()))?;
+        .map_err(|error| {
+            SettlementError::Backend(error.to_string())
+        })?;
 
         let Some((finalized, payload, retained_mass)) =
             self.advance_materialized(
@@ -189,7 +195,6 @@ impl BitcoinObservationPipeline {
                 retained_mass,
                 event_receipt,
                 observed,
-                submission,
             )?
         else {
             return Ok(None);
@@ -220,7 +225,6 @@ impl BitcoinObservationPipeline {
         retained_mass: u128,
         event_receipt: EventReceipt,
         observed: ObservedBitcoinTransaction,
-        submission: usize,
     ) -> Result<
         Option<(FinalizedSettlement, BitcoinPayload, u128)>,
         SettlementError,
@@ -234,7 +238,6 @@ impl BitcoinObservationPipeline {
                 event_receipt,
                 bitcoin,
                 observed,
-                submission,
             )?;
 
         let receipt = finalized.receipt.as_ref().ok_or_else(|| {
@@ -243,33 +246,17 @@ impl BitcoinObservationPipeline {
             )
         })?;
 
-        let activation = receipt.event.heritage.state.activations();
-
-        let submission_id = u64::try_from(submission)
-            .map_err(|error| {
-                SettlementError::Backend(format!(
-                    "submission index exceeds supported range: {error}",
-                ))
-            })?;
-
-        qp_hd::commands::persist_submission(
+        qp_hd::commands::persist_network_event(
             substrate,
-            activation,
-            submission_id,
+            self.activation,
+            &self.network,
             &receipt.event,
         )?;
 
-        qp_hd::commands::persist_submission_network(
-            substrate,
-            activation,
-            submission_id,
-            &self.network,
-        )?;
-
-        self.miner
-            .submissions
-            .insert(substrate.to_owned(), submission_id);
-
-        Ok(Some((finalized, payload, retained_mass)))
+        Ok(Some((
+            finalized,
+            payload,
+            retained_mass,
+        )))
     }
 }
