@@ -137,7 +137,7 @@ impl BitcoinObservationPipeline {
                 &pre_settlement.state,
             )?;
 
-        let heritage = self
+        let (heritage, submission) = self
             .miner
             .submit(
                 substrate,
@@ -155,6 +155,16 @@ impl BitcoinObservationPipeline {
                     error,
                 ))
             })?;
+
+        let submission = usize::try_from(submission).map_err(|error| {
+            SettlementError::Backend(format!(
+                "submission ordinal cannot be represented as usize: substrate={} activation={} network={}: {}",
+                substrate,
+                activation,
+                self.network,
+                error,
+            ))
+        })?;
 
         let direction = Miner::direction(
             heritage,
@@ -195,6 +205,7 @@ impl BitcoinObservationPipeline {
                 retained_mass,
                 event_receipt,
                 observed,
+                submission,
             )?
         else {
             return Ok(None);
@@ -225,6 +236,7 @@ impl BitcoinObservationPipeline {
         retained_mass: u128,
         event_receipt: EventReceipt,
         observed: ObservedBitcoinTransaction,
+        submission: usize,
     ) -> Result<
         Option<(FinalizedSettlement, BitcoinPayload, u128)>,
         SettlementError,
@@ -238,6 +250,7 @@ impl BitcoinObservationPipeline {
                 event_receipt,
                 bitcoin,
                 observed,
+                submission,
             )?;
 
         let receipt = finalized.receipt.as_ref().ok_or_else(|| {
