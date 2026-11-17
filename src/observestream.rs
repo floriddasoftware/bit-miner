@@ -270,6 +270,7 @@ fn packet_outpoint(packet: &WirePacket) -> OutPoint {
     OutPoint::new(packet.txid(), packet.vout())
 }
 
+
 /// Validates the clip and budget, processes the observation (delegated to
 /// pipeline.process -> SettlementEngine), persists and verifies wire packets,
 /// resolves parent outpoints from persisted packets, and builds an unsigned PSBT.
@@ -301,51 +302,19 @@ pub fn refresh<R: PrevoutResolver>(
         ))
     })?;
 
-    let mut persisted = 0u64;
-    let mut ended = false;
-    let mut parents = ParentIndex::new();
-
-    for number in 1..=budget.max_events {
-        match load_wirepackets(substrate, activation, number, &network) {
-            Ok(bytes) => {
-                if ended {
-                    return Err(fail(format!(
-                        "submission sequence gap: substrate={substrate} activation={activation} missing_before={number}"
-                    )));
-                }
-
-                let packets = decode_wirepackets(&bytes)?;
-                let commitment = packets[0].commitment;
-
-                if packets.iter().any(|p| p.commitment != commitment) {
-                    return Err(fail(format!(
-                        "mixed commitments in submission: {number}"
-                    )));
-                }
-
-                for packet in packets {
-                    parents
-                        .entry(packet_outpoint(&packet))
-                        .or_default()
-                        .push((number, packet));
-                }
-
-                persisted = number;
-            }
-            Err(e) if e.kind() == ErrorKind::NotFound => ended = true,
-            Err(e) => {
-                return Err(fail(format!(
-                    "wirepacket load failed: substrate={substrate} activation={activation} submission={number}: {e}"
-                )));
-            }
-        }
-    }
-
-    // Persisted wire packets are authoritative; repair the in-memory counter.
-    pipeline
+    let persisted = pipeline
         .miner
         .submissions
-        .insert(substrate.to_owned(), persisted);
+        .get(substrate)
+        .copied()
+        .unwrap_or(0);
+
+    if persisted > budget.max_events {
+        return Err(fail(format!(
+            "submission count exceeds budget: substrate={substrate} activation={activation} network={network} persisted={persisted} max={}",
+            budget.max_events,
+        )));
+    }
 
     let submission = persisted
         .checked_add(1)
@@ -356,6 +325,40 @@ pub fn refresh<R: PrevoutResolver>(
                 budget.max_events,
             ))
         })?;
+
+    let mut parents = ParentIndex::new();
+
+    match load_wirepackets(substrate, activation, &network) {
+        Ok(bytes) => {
+            if persisted == 0 {
+                return Err(fail(format!(
+                    "persisted wire packets exist but submission counter is zero: substrate={substrate} activation={activation} network={network}"
+                )));
+            }
+
+            let packets = decode_wirepackets(&bytes)?;
+            let commitment = packets[0].commitment;
+
+            if packets.iter().any(|p| p.commitment != commitment) {
+                return Err(fail(
+                    "mixed commitments in persisted wire packets",
+                ));
+            }
+
+            for packet in packets {
+                parents
+                    .entry(packet_outpoint(&packet))
+                    .or_default()
+                    .push((persisted, packet));
+            }
+        }
+        Err(e) if e.kind() == ErrorKind::NotFound => {}
+        Err(e) => {
+            return Err(fail(format!(
+                "wirepacket load failed: substrate={substrate} activation={activation} network={network}: {e}"
+            )));
+        }
+    }
 
     let Some((finalized, payload, retained_mass, commitment)) =
         pipeline.process(substrate, observed)?
@@ -394,7 +397,6 @@ pub fn refresh<R: PrevoutResolver>(
         ));
     }
 
-    // The current commitment applies only to the current submission's packets.
     let generated = finalized.wire_packets(commitment);
 
     if generated.is_empty() {
@@ -402,10 +404,14 @@ pub fn refresh<R: PrevoutResolver>(
     }
 
     let txid = tx.compute_txid();
-    let matches = |p: &WirePacket| p.txid() == txid && p.commitment == commitment;
+    let matches = |p: &WirePacket| {
+        p.txid() == txid && p.commitment == commitment
+    };
 
     if !generated.iter().all(matches) {
-        return Err(fail("generated packet does not match finalized settlement"));
+        return Err(fail(
+            "generated packet does not match finalized settlement",
+        ));
     }
 
     let mut packet_bytes = Vec::new();
@@ -417,37 +423,44 @@ pub fn refresh<R: PrevoutResolver>(
             return Err(fail("wire-packet serialization failed"));
         }
 
-        let len = u32::try_from(body.len()).map_err(|e| fail(e.to_string()))?;
+        let len = u32::try_from(body.len())
+            .map_err(|e| fail(e.to_string()))?;
+
         packet_bytes.extend_from_slice(&len.to_be_bytes());
         packet_bytes.extend_from_slice(&body);
     }
 
     persist_wirepackets(
-    substrate,
-    activation,
-    submission,
-    &network,
-    &packet_bytes,).map_err(|e| {
-            fail(format!(
-                "wire-packet persistence failed: substrate={substrate} activation={activation} submission={submission}: {e}"
-            ))
-        })?;
+        substrate,
+        activation,
+        &network,
+        &packet_bytes,
+    )
+    .map_err(|e| {
+        fail(format!(
+            "wire-packet persistence failed: substrate={substrate} activation={activation} network={network} submission={submission}: {e}"
+        ))
+    })?;
 
-let persisted_bytes =
-    load_wirepackets(substrate, activation, submission, &network)
-        .map_err(|e| {
-            fail(format!(
-                "wire-packet reload failed: submission={submission}: {e}"
-            ))
-        })?;
+    let persisted_bytes =
+        load_wirepackets(substrate, activation, &network)
+            .map_err(|e| {
+                fail(format!(
+                    "wire-packet reload failed: substrate={substrate} activation={activation} network={network} submission={submission}: {e}"
+                ))
+            })?;
 
     let wire_packets = decode_wirepackets(&persisted_bytes)?;
 
-    if wire_packets.len() != generated.len() || !wire_packets.iter().all(matches) {
-        return Err(fail("persisted packets differ from finalized submission"));
+    if wire_packets.len() != generated.len()
+        || !wire_packets.iter().all(matches)
+    {
+        return Err(fail(
+            "persisted packets differ from finalized submission",
+        ));
     }
 
-    // Commit only after persistence and verification succeed.
+    // Commit the submission count only after persistence and verification.
     pipeline
         .miner
         .submissions
@@ -460,8 +473,6 @@ let persisted_bytes =
         persisted_bytes.len(),
     );
 
-    // Parent identity comes from the persisted parent packet itself: its own
-    // submission number and its own commitment, never the current event's.
     let mut prevouts = Vec::with_capacity(tx.input.len());
 
     for (i, input) in tx.input.iter().enumerate() {
@@ -469,7 +480,7 @@ let persisted_bytes =
 
         let (parent_submission, parent_packet) =
             match parents.get(outpoint).map(Vec::as_slice) {
-                Some([(submission, packet)]) => (*submission, packet),
+                Some([(parent_submission, packet)]) => (*parent_submission, packet),
                 Some(_) => {
                     return Err(fail(format!(
                         "ambiguous parent packets: input={i} outpoint={outpoint}"
@@ -504,7 +515,9 @@ let persisted_bytes =
     }
 
     let psbt = BitcoinPsbt::from_settlement(&finalized, prevouts)
-        .map_err(|e| fail(format!("Bitcoin PSBT preparation failed: {e}")))?;
+        .map_err(|e| {
+            fail(format!("Bitcoin PSBT preparation failed: {e}"))
+        })?;
 
     println!(
         "bitcoin_psbt=prepared submission={submission} unsigned_txid={}",
