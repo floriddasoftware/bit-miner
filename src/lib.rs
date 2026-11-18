@@ -1,4 +1,5 @@
-//! bit_minner — Bitcoin observation / settlement support for QTM.
+
+// bit_minner — Bitcoin observation / settlement support for QTM.
 
 pub mod sharedtypes;
 
@@ -50,6 +51,13 @@ pub mod settlement;
 // Primary exports.
 pub use bitcoin_observation_pipeline::BitcoinObservationPipeline;
 pub use render::RenderState;
+
+pub use bitcoinpsbt::{
+    BitcoinPsbt,
+    BitcoinPsbtResult,
+    PrevoutResolver,
+    ResolvedPrevout,
+};
 
 pub use bitcoinpayload::{
     BitcoinMempool,
