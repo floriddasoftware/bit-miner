@@ -47,19 +47,20 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         for window in &mut windows {
             let substrate = window.substrate.clone();
             match stream.stream(
-                &substrate,
-                &mut pipeline,
-            ).await? {
-                Ok(Some(_)) => {}
-                Ok(None) => {}
-                Err(error) => {
-                    eprintln!(
-                        "Pipeline settlement failed for {}: {}",
-                        substrate,
-                        error
-                    );
-                }
-            }
+    &substrate,
+    &mut pipeline,
+    &resolver,
+).await? {
+    Ok(Some(_)) => {}
+    Ok(None) => {}
+    Err(error) => {
+        eprintln!(
+            "Pipeline settlement failed for {}: {}",
+            substrate,
+            error
+        );
+    }
+}
         }
     }
 }
