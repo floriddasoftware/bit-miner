@@ -5,7 +5,12 @@ use std::{
     str::FromStr,
 };
 
-use bitcoin::{OutPoint, Txid};
+use bitcoin::{
+    Amount,
+    OutPoint,
+    TxOut,
+    Txid,
+};
 
 use futures_util::{SinkExt, StreamExt};
 use qp_hd::commands::{load_budget, load_wirepackets, persist_wirepackets};
@@ -17,7 +22,7 @@ use tokio_tungstenite::{
 };
 
 use crate::{
-    bitcoinpsbt::{BitcoinPsbt, PrevoutResolver},
+    bitcoinpsbt::{BitcoinPsbt, ResolvedPrevout},
     broadcast::{FinalizedSettlement, WirePacket},
     observebitcointransaction::ObservedBitcoinTransaction,
     settlement::SettlementError,
