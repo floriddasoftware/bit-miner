@@ -20,7 +20,10 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 rand = "0.8"
 mio = { version = "1", features = ["net", "os-poll"] }
-qp-hd = { git = "https://github.com/floriddasoftware/QTM" }
+qp-hd = {
+    git = "https://github.com/floriddasoftware/QTM",
+    branch = "main"
+}
 qtm-graph = { git = "https://github.com/floriddasoftware/Quantum-Economies" }
 quantom_value = { git = "https://github.com/QuantPerm-Labs/Quantom-VALUE" }
 futures-util = "0.3"
