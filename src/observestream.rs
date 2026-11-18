@@ -137,22 +137,21 @@ impl MempoolSpaceStream {
         }
     }
 
-    pub async fn stream<R: PrevoutResolver>(
-        &mut self,
-        substrate: &str,
-        pipeline: &mut BitcoinObservationPipeline,
-        resolver: &R,
-    ) -> ObservationResult<PipelineOutcome> {
-        let BitcoinObservation::Transaction(transaction) =
-            self.next_observation().await?;
+    pub async fn stream(
+    &mut self,
+    substrate: &str,
+    pipeline: &mut BitcoinObservationPipeline,
+) -> ObservationResult<PipelineOutcome> {
+    let BitcoinObservation::Transaction(transaction) =
+        self.next_observation().await?;
 
-        let observed = ObservedBitcoinTransaction::from_observedtransaction(
-            transaction,
-            self.source,
-        );
+    let observed = ObservedBitcoinTransaction::from_observedtransaction(
+        transaction,
+        self.source,
+    );
 
-        Ok(refresh(pipeline, substrate, observed, resolver))
-    }
+    Ok(refresh(pipeline, substrate, observed))
+}
 
     async fn fill(&mut self) -> ObservationResult<()> {
         let message = self
@@ -275,11 +274,10 @@ fn packet_outpoint(packet: &WirePacket) -> OutPoint {
 /// pipeline.process -> SettlementEngine), persists and verifies wire packets,
 /// resolves parent outpoints from persisted packets, and builds an unsigned PSBT.
 /// The wallet client owns signing and broadcast.
-pub fn refresh<R: PrevoutResolver>(
+pub fn refresh(
     pipeline: &mut BitcoinObservationPipeline,
     substrate: &str,
     observed: ObservedBitcoinTransaction,
-    resolver: &R,
 ) -> PipelineOutcome {
     let activation = pipeline
         .miner
@@ -337,7 +335,10 @@ pub fn refresh<R: PrevoutResolver>(
             }
 
             let packets = decode_wirepackets(&bytes)?;
-            let commitment = packets[0].commitment;
+            let commitment = packets
+                .first()
+                .ok_or_else(|| fail("persisted wire packets are empty"))?
+                .commitment;
 
             if packets.iter().any(|p| p.commitment != commitment) {
                 return Err(fail(
@@ -404,6 +405,7 @@ pub fn refresh<R: PrevoutResolver>(
     }
 
     let txid = tx.compute_txid();
+
     let matches = |p: &WirePacket| {
         p.txid() == txid && p.commitment == commitment
     };
@@ -480,7 +482,9 @@ pub fn refresh<R: PrevoutResolver>(
 
         let (parent_submission, parent_packet) =
             match parents.get(outpoint).map(Vec::as_slice) {
-                Some([(parent_submission, packet)]) => (*parent_submission, packet),
+                Some([(parent_submission, packet)]) => {
+                    (*parent_submission, packet)
+                }
                 Some(_) => {
                     return Err(fail(format!(
                         "ambiguous parent packets: input={i} outpoint={outpoint}"
@@ -493,14 +497,15 @@ pub fn refresh<R: PrevoutResolver>(
                 }
             };
 
-        let resolved = resolver
-            .resolve_packet(parent_packet, parent_submission)
-            .map_err(|e| {
-                fail(format!(
-                    "outpoint resolution failed: input={i} outpoint={outpoint} parent_submission={parent_submission} parent_commitment={}: {e}",
-                    hex::encode(parent_packet.commitment),
-                ))
-            })?;
+        let resolved = ResolvedPrevout {
+            outpoint: parent_packet.outpoint,
+            output: TxOut {
+                value: Amount::from_sat(parent_packet.value),
+                script_pubkey: parent_packet.script_pubkey.clone(),
+            },
+            submission: parent_submission,
+            commitment: parent_packet.commitment,
+        };
 
         if resolved.outpoint != *outpoint
             || resolved.submission != parent_submission
@@ -508,6 +513,14 @@ pub fn refresh<R: PrevoutResolver>(
         {
             return Err(fail(format!(
                 "resolved prevout mismatch: input={i} outpoint={outpoint}"
+            )));
+        }
+
+        if resolved.output.value.to_sat() != parent_packet.value
+            || resolved.output.script_pubkey != parent_packet.script_pubkey
+        {
+            return Err(fail(format!(
+                "resolved prevout output mismatch: input={i} outpoint={outpoint}"
             )));
         }
 
@@ -530,7 +543,6 @@ pub fn refresh<R: PrevoutResolver>(
 
     Ok(Some((finalized, psbt, retained_mass, commitment)))
 }
-
 
 pub fn decode_wirepackets(bytes: &[u8]) -> Result<Vec<WirePacket>, SettlementError> {
     let mut rest = bytes;
