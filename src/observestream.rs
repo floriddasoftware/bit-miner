@@ -155,7 +155,11 @@ impl MempoolSpaceStream {
         self.source,
     );
 
-    Ok(refresh(pipeline, substrate, observed))
+    refresh(pipeline, substrate, observed)
+        .await
+        .map_err(|e| -> Box<dyn Error + Send + Sync> {
+            Box::new(e)
+        })
 }
 
     async fn fill(&mut self) -> ObservationResult<()> {
