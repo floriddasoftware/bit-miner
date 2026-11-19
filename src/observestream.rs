@@ -275,11 +275,12 @@ fn packet_outpoint(packet: &WirePacket) -> OutPoint {
 }
 
 
-/// Validates the clip and budget, processes the observation (delegated to
-/// pipeline.process -> SettlementEngine), persists and verifies wire packets,
-/// resolves parent outpoints from persisted packets, and builds an unsigned PSBT.
+/// Validates the clip and budget, processes the observation, resolves
+/// miner-generated and external Bitcoin prevouts, persists and verifies
+/// wire packets, and builds an unsigned PSBT.
+///
 /// The wallet client owns signing and broadcast.
-pub fn refresh(
+pub async fn refresh(
     pipeline: &mut BitcoinObservationPipeline,
     substrate: &str,
     observed: ObservedBitcoinTransaction,
@@ -329,6 +330,7 @@ pub fn refresh(
             ))
         })?;
 
+    // Index the previously persisted QTM packets.
     let mut parents = ParentIndex::new();
 
     match load_wirepackets(substrate, activation, &network) {
@@ -340,12 +342,13 @@ pub fn refresh(
             }
 
             let packets = decode_wirepackets(&bytes)?;
+
             let commitment = packets
                 .first()
                 .ok_or_else(|| fail("persisted wire packets are empty"))?
                 .commitment;
 
-            if packets.iter().any(|p| p.commitment != commitment) {
+            if packets.iter().any(|packet| packet.commitment != commitment) {
                 return Err(fail(
                     "mixed commitments in persisted wire packets",
                 ));
@@ -374,28 +377,32 @@ pub fn refresh(
 
     let tx = &finalized.transaction;
 
+    // Validate materialized inputs.
     if payload.inputs.len() != tx.input.len()
         || payload
             .inputs
             .iter()
             .zip(&tx.input)
-            .any(|(p, t)| p.previous_output != t.previous_output)
+            .any(|(payload_input, tx_input)| {
+                payload_input.previous_output != tx_input.previous_output
+            })
     {
         return Err(fail(
             "materialized inputs do not match finalized transaction",
         ));
     }
 
+    // Validate materialized outputs.
     if payload.outputs.len() != tx.output.len()
         || payload
             .outputs
             .iter()
             .zip(&tx.output)
             .enumerate()
-            .any(|(i, (p, t))| {
-                p.vout as usize != i
-                    || p.value != t.value.to_sat()
-                    || p.script_pubkey != t.script_pubkey
+            .any(|(index, (payload_output, tx_output))| {
+                payload_output.vout as usize != index
+                    || payload_output.value != tx_output.value.to_sat()
+                    || payload_output.script_pubkey != tx_output.script_pubkey
             })
     {
         return Err(fail(
@@ -411,8 +418,8 @@ pub fn refresh(
 
     let txid = tx.compute_txid();
 
-    let matches = |p: &WirePacket| {
-        p.txid() == txid && p.commitment == commitment
+    let matches = |packet: &WirePacket| {
+        packet.txid() == txid && packet.commitment == commitment
     };
 
     if !generated.iter().all(matches) {
@@ -421,6 +428,112 @@ pub fn refresh(
         ));
     }
 
+    // Resolve every input before persisting or committing this submission.
+    let client = reqwest::Client::new();
+    let mut prevouts = Vec::with_capacity(tx.input.len());
+
+    for (i, input) in tx.input.iter().enumerate() {
+        let outpoint = &input.previous_output;
+
+        let resolved = match parents.get(outpoint).map(Vec::as_slice) {
+            // Parent was created by a previous QTM submission.
+            Some([(parent_submission, packet)]) => {
+                let resolved = ResolvedPrevout {
+                    outpoint: packet.outpoint,
+                    output: TxOut {
+                        value: Amount::from_sat(packet.value),
+                        script_pubkey: packet.script_pubkey.clone(),
+                    },
+                    submission: *parent_submission,
+                    commitment: packet.commitment,
+                };
+
+                if resolved.outpoint != *outpoint {
+                    return Err(fail(format!(
+                        "resolved QTM prevout mismatch: input={i} expected={outpoint} resolved={}",
+                        resolved.outpoint,
+                    )));
+                }
+
+                if resolved.output.value.to_sat() != packet.value
+                    || resolved.output.script_pubkey != packet.script_pubkey
+                {
+                    return Err(fail(format!(
+                        "resolved QTM prevout output mismatch: input={i} outpoint={outpoint}"
+                    )));
+                }
+
+                resolved
+            }
+
+            Some(_) => {
+                return Err(fail(format!(
+                    "ambiguous parent packets: input={i} outpoint={outpoint}"
+                )));
+            }
+
+            // Parent is not in QTM persistence. Resolve it from Bitcoin.
+            None => {
+                let parent_txid = outpoint.txid;
+
+                let parent_transaction = fetch_decode(
+                    &client,
+                    format!("{MEMPOOL_SPACE_API}/tx/{parent_txid}/raw"),
+                )
+                .await
+                .map_err(|e| {
+                    fail(format!(
+                        "Bitcoin parent transaction lookup failed: input={i} outpoint={outpoint}: {e}"
+                    ))
+                })?;
+
+                let actual_parent_txid = parent_transaction.compute_txid();
+
+                if actual_parent_txid != parent_txid {
+                    return Err(fail(format!(
+                        "Bitcoin parent transaction ID mismatch: input={i} expected={parent_txid} actual={actual_parent_txid}"
+                    )));
+                }
+
+                let parent_output = parent_transaction
+                    .output
+                    .get(outpoint.vout as usize)
+                    .ok_or_else(|| {
+                        fail(format!(
+                            "Bitcoin parent output not found: input={i} outpoint={outpoint} outputs={}",
+                            parent_transaction.output.len(),
+                        ))
+                    })?;
+
+                ResolvedPrevout {
+                    outpoint: *outpoint,
+                    output: parent_output.clone(),
+
+                    // Zero identifies an external Bitcoin prevout,
+                    // not a QTM submission.
+                    submission: 0,
+                    commitment: [0u8; 32],
+                }
+            }
+        };
+
+        if resolved.outpoint != *outpoint {
+            return Err(fail(format!(
+                "resolved prevout mismatch: input={i} expected={outpoint} resolved={}",
+                resolved.outpoint,
+            )));
+        }
+
+        prevouts.push(resolved);
+    }
+
+    // Build the PSBT only after all Bitcoin prevouts have been resolved.
+    let psbt = BitcoinPsbt::from_settlement(&finalized, prevouts)
+        .map_err(|e| {
+            fail(format!("Bitcoin PSBT preparation failed: {e}"))
+        })?;
+
+    // Serialize the current submission's generated QTM packets.
     let mut packet_bytes = Vec::new();
 
     for packet in &generated {
@@ -437,6 +550,7 @@ pub fn refresh(
         packet_bytes.extend_from_slice(&body);
     }
 
+    // Persist the current submission.
     persist_wirepackets(
         substrate,
         activation,
@@ -449,6 +563,7 @@ pub fn refresh(
         ))
     })?;
 
+    // Reload and verify persisted packets.
     let persisted_bytes =
         load_wirepackets(substrate, activation, &network)
             .map_err(|e| {
@@ -467,7 +582,8 @@ pub fn refresh(
         ));
     }
 
-    // Commit the submission count only after persistence and verification.
+    // Commit the submission counter only after PSBT preparation,
+    // packet persistence, and packet verification have succeeded.
     pipeline
         .miner
         .submissions
@@ -480,68 +596,12 @@ pub fn refresh(
         persisted_bytes.len(),
     );
 
-    let mut prevouts = Vec::with_capacity(tx.input.len());
-
-    for (i, input) in tx.input.iter().enumerate() {
-        let outpoint = &input.previous_output;
-
-        let (parent_submission, parent_packet) =
-            match parents.get(outpoint).map(Vec::as_slice) {
-                Some([(parent_submission, packet)]) => {
-                    (*parent_submission, packet)
-                }
-                Some(_) => {
-                    return Err(fail(format!(
-                        "ambiguous parent packets: input={i} outpoint={outpoint}"
-                    )));
-                }
-                None => {
-                    return Err(fail(format!(
-                        "missing parent packet: input={i} outpoint={outpoint}"
-                    )));
-                }
-            };
-
-        let resolved = ResolvedPrevout {
-            outpoint: parent_packet.outpoint,
-            output: TxOut {
-                value: Amount::from_sat(parent_packet.value),
-                script_pubkey: parent_packet.script_pubkey.clone(),
-            },
-            submission: parent_submission,
-            commitment: parent_packet.commitment,
-        };
-
-        if resolved.outpoint != *outpoint
-            || resolved.submission != parent_submission
-            || resolved.commitment != parent_packet.commitment
-        {
-            return Err(fail(format!(
-                "resolved prevout mismatch: input={i} outpoint={outpoint}"
-            )));
-        }
-
-        if resolved.output.value.to_sat() != parent_packet.value
-            || resolved.output.script_pubkey != parent_packet.script_pubkey
-        {
-            return Err(fail(format!(
-                "resolved prevout output mismatch: input={i} outpoint={outpoint}"
-            )));
-        }
-
-        prevouts.push(resolved);
-    }
-
-    let psbt = BitcoinPsbt::from_settlement(&finalized, prevouts)
-        .map_err(|e| {
-            fail(format!("Bitcoin PSBT preparation failed: {e}"))
-        })?;
-
     println!(
         "bitcoin_psbt=prepared submission={submission} unsigned_txid={}",
         psbt.unsigned_txid(),
     );
 
+    // Broadcast only after persistence and verification.
     for packet in wire_packets {
         pipeline.miner().broadcaster.publish(packet);
     }
