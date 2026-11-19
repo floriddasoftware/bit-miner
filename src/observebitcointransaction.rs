@@ -1,13 +1,12 @@
-
 use bitcoin::{
     Amount,
+    PublicKey,
     ScriptBuf,
     TxIn,
     Txid,
 };
 use qtm_graph::graph::frame::Direction;
 use quantom_value::QuantPerm;
-use qp_hd::protocolvalue::Qtm;
 
 use crate::{
     bitcoinoutputqpinput::BitcoinOutput,
@@ -130,6 +129,7 @@ impl ObservedBitcoinTransaction {
     pub fn new_transaction(
         manifold: &QuantPerm,
         inputs: Vec<BitcoinInput>,
+        public_key: PublicKey,
         source: BitcoinObservationSource,
         direction: &Direction,
         submission: usize,
@@ -137,6 +137,7 @@ impl ObservedBitcoinTransaction {
         Self::new_transact(
             manifold,
             inputs,
+            public_key,
             source,
             direction,
             submission,
@@ -147,6 +148,7 @@ impl ObservedBitcoinTransaction {
     pub fn new_transact(
         manifold: &QuantPerm,
         inputs: Vec<BitcoinInput>,
+        public_key: PublicKey,
         source: BitcoinObservationSource,
         direction: &Direction,
         submission: usize,
@@ -158,8 +160,6 @@ impl ObservedBitcoinTransaction {
             )
             .into());
         }
-
-        let coordinate = Qtm::derive_coordinate(manifold);
 
         let mut outputs = Vec::with_capacity(inputs.len());
         let mut total_fee = 0u64;
@@ -202,10 +202,10 @@ impl ObservedBitcoinTransaction {
                 ScriptBuf::new(),
             );
 
-            let retained = output.assign(
+            let retained = output.assign_public_key(
                 manifold,
-                coordinate,
-            )?;
+                public_key,
+            );
 
             eprintln!(
                 "[bitcoin-output-assigned] input={} vout={} input_value_sat={} fee_sat={} output_value_sat={} retained_mass={} script_bytes={}",
