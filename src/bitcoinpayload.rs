@@ -211,6 +211,12 @@ impl BitcoinPayload {
     pub fn replay_mass(&self, manifold: &QuantPerm) -> u128 {
         self.retained(manifold).mass
     }
+    
+    
+    #[inline(always)]
+pub fn replay_sat(value: u64) -> u64 {
+    value / 100
+}
 
     #[inline(always)]
     pub fn fee_mass(
@@ -223,3 +229,6 @@ impl BitcoinPayload {
             / 100
     }
 }
+
+
+
