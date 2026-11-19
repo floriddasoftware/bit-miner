@@ -131,7 +131,7 @@ impl BitcoinObservationPipeline {
         let pre_settlement =
             qtm_open_manifold_until(substrate, self.activation);
 
-        let (bitcoin, retained_mass, depth) =
+        let (bitcoininput, retained_mass, depth) =
             self.bitcoin_payload(
                 &observed,
                 &pre_settlement.state,
