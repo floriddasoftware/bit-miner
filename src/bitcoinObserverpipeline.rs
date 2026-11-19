@@ -224,7 +224,7 @@ impl BitcoinObservationPipeline {
         &mut self,
         observed: &ObservedBitcoinTransaction,
         manifold: &QuantPerm,
-    ) -> Result<(BitcoinPayload, u128, Depth), SettlementError> {
+    ) -> Result<(BitcoinInput, u128, Depth), SettlementError> {
         self.utxo.collect(observed, manifold)
     }
 
