@@ -1,4 +1,3 @@
-
 use bitcoin::{
     OutPoint,
     ScriptBuf,
@@ -10,8 +9,6 @@ use qtm_graph::graph::frame::Depth;
 use quantom_value::QuantPerm;
 
 use crate::{
-    bitcoinoutputqpinput::BitcoinOutput,
-    bitcoinpayload::BitcoinPayload,
     miner::Miner,
     observebitcointransaction::ObservedBitcoinTransaction,
     qpoutputsbitcoininput::BitcoinInput,
@@ -26,12 +23,14 @@ impl BitcoinUTXOCollector {
         Self
     }
 
+    /// Capture spendable outpoints from an observed transaction as BitcoinInputs.
+    /// Downstream architecture is responsible for constructing new outputs.
     #[inline(always)]
     pub fn collect(
         &mut self,
         observed: &ObservedBitcoinTransaction,
         manifold: &QuantPerm,
-    ) -> Result<(BitcoinPayload, u128, Depth), SettlementError> {
+    ) -> Result<(Vec<BitcoinInput>, u128, Depth), SettlementError> {
         let transaction = &observed.transaction;
 
         if transaction.compute_txid() != observed.txid {
@@ -42,23 +41,22 @@ impl BitcoinUTXOCollector {
 
         let mut depth = Depth::new("qp/payload");
 
-        let spendable_outputs = transaction
+        let spendable = transaction
             .output
             .iter()
             .enumerate()
             .filter(|(_, output)| {
-                output.value.to_sat() > 0
-                    && !output.script_pubkey.is_op_return()
+                output.value.to_sat() > 0 && !output.script_pubkey.is_op_return()
             })
             .collect::<Vec<_>>();
 
-        if spendable_outputs.is_empty() {
+        if spendable.is_empty() {
             return Err(SettlementError::Unsupported(
                 "observed transaction has no spendable outputs",
             ));
         }
 
-        let inputs = spendable_outputs
+        let inputs = spendable
             .iter()
             .enumerate()
             .map(|(position, (parent_vout, _))| {
@@ -80,32 +78,8 @@ impl BitcoinUTXOCollector {
             })
             .collect::<Vec<BitcoinInput>>();
 
-        let output_offset = inputs.len();
-
-        let outputs = spendable_outputs
-            .iter()
-            .enumerate()
-            .map(|(position, (_, txout))| {
-                let (output, retained) = BitcoinOutput::new(
-                    manifold,
-                    position as u32,
-                    txout.value.to_sat(),
-                    txout.script_pubkey.clone(),
-                );
-
-                depth.insert(
-                    "output",
-                    output_offset + position,
-                    retained,
-                );
-
-                output
-            })
-            .collect::<Vec<BitcoinOutput>>();
-
         let retained_mass = Miner::deep(manifold, &depth).mass;
-        let payload = BitcoinPayload::new(inputs, outputs);
 
-        Ok((payload, retained_mass, depth))
+        Ok((inputs, retained_mass, depth))
     }
 }
