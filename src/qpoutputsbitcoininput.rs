@@ -1,4 +1,3 @@
-
 use std::{
     error::Error,
     fmt,
@@ -94,6 +93,7 @@ impl Error for SigningError {}
 #[derive(Clone, Debug)]
 pub struct BitcoinInput {
     pub previous_output: OutPoint,
+    pub value: u64,
     pub script_sig: ScriptBuf,
     pub witness: Witness,
     pub sequence: Sequence,
@@ -135,6 +135,7 @@ impl BitcoinInput {
     #[inline(always)]
     fn payload_mass(&self) -> u128 {
         self.previous_output_mass()
+            .saturating_add(u128::from(self.value))
             .saturating_add(
                 self.byte_mass(self.script_sig.as_bytes()),
             )
@@ -159,8 +160,17 @@ impl BitcoinInput {
         );
 
         depth.insert(
-            "script_sig",
+            "value",
             position.saturating_add(1),
+            manifold.retain(
+                u128::from(self.value),
+                manifold.dimension(),
+            ),
+        );
+
+        depth.insert(
+            "script_sig",
+            position.saturating_add(2),
             manifold.retain(
                 self.byte_mass(self.script_sig.as_bytes()),
                 manifold.dimension(),
@@ -169,7 +179,7 @@ impl BitcoinInput {
 
         depth.insert(
             "witness",
-            position.saturating_add(2),
+            position.saturating_add(3),
             manifold.retain(
                 self.witness_mass(),
                 manifold.dimension(),
@@ -182,12 +192,14 @@ impl BitcoinInput {
     pub fn new(
         manifold: &QuantPerm,
         previous_output: OutPoint,
+        value: u64,
         script_sig: ScriptBuf,
         witness: Witness,
         sequence: Sequence,
     ) -> (Retain, Self) {
         let input = Self {
             previous_output,
+            value,
             script_sig,
             witness,
             sequence,
