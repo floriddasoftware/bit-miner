@@ -1,4 +1,3 @@
-
 use std::{
     error::Error,
     fmt,
@@ -19,6 +18,7 @@ use crate::{
     broadcast::FinalizedSettlement,
     observebitcointransaction::ObservedBitcoinTransaction,
     qpeventreceipt::EventReceipt,
+    qpoutputsbitcoininput::BitcoinInput,
     sharedtypes::SettlementState,
 };
 
@@ -133,7 +133,7 @@ impl SettlementEngine {
     pub fn process(
         &self,
         receipt: EventReceipt,
-        bitcoin: BitcoinPayload,
+        bitcoin_inputs: Vec<BitcoinInput>,
         observed: ObservedBitcoinTransaction,
         submission: usize,
     ) -> Result<(FinalizedSettlement, BitcoinPayload), SettlementError> {
@@ -157,7 +157,7 @@ impl SettlementEngine {
 
         let (transaction, payload) = Self::materialize(
             manifold,
-            bitcoin,
+            bitcoin_inputs,
             observed,
             &direction,
             submission,
@@ -193,12 +193,12 @@ impl SettlementEngine {
     #[inline(always)]
     fn materialize(
         manifold: &QuantPerm,
-        bitcoin: BitcoinPayload,
+        bitcoin_inputs: Vec<BitcoinInput>,
         observed: ObservedBitcoinTransaction,
         direction: &Direction,
         submission: usize,
     ) -> Result<(Transaction, BitcoinPayload), SettlementError> {
-        if bitcoin.inputs.is_empty() {
+        if bitcoin_inputs.is_empty() {
             return Err(SettlementError::Unsupported(
                 "cannot materialize a transaction without inputs",
             ));
@@ -207,7 +207,7 @@ impl SettlementEngine {
         let (materialized, payload) =
             ObservedBitcoinTransaction::new_transact(
                 manifold,
-                bitcoin,
+                bitcoin_inputs,
                 observed.source,
                 direction,
                 submission,
