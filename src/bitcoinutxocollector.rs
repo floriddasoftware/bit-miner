@@ -1,3 +1,4 @@
+
 use bitcoin::{
     OutPoint,
     ScriptBuf,
@@ -46,7 +47,8 @@ impl BitcoinUTXOCollector {
             .iter()
             .enumerate()
             .filter(|(_, output)| {
-                output.value.to_sat() > 0 && !output.script_pubkey.is_op_return()
+                output.value.to_sat() > 0
+                    && !output.script_pubkey.is_op_return()
             })
             .collect::<Vec<_>>();
 
@@ -59,15 +61,18 @@ impl BitcoinUTXOCollector {
         let inputs = spendable
             .iter()
             .enumerate()
-            .map(|(position, (parent_vout, _))| {
+            .map(|(position, (parent_vout, output))| {
                 let previous_output = OutPoint {
                     txid: observed.txid,
                     vout: *parent_vout as u32,
                 };
 
+                let value = output.value.to_sat();
+
                 let (retained, input) = BitcoinInput::new(
                     manifold,
                     previous_output,
+                    value,
                     ScriptBuf::new(),
                     Witness::new(),
                     Sequence::MAX,
