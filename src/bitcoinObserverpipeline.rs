@@ -20,6 +20,7 @@ use crate::{
     miner::{ActiveClip, Miner},
     observebitcointransaction::ObservedBitcoinTransaction,
     qpeventreceipt::EventReceipt,
+    qpoutputsbitcoininput::BitcoinInput,
     render::RenderState,
     settlement::{SettlementEngine, SettlementError},
     sharedtypes::SettlementState,
@@ -131,8 +132,8 @@ impl BitcoinObservationPipeline {
         let pre_settlement =
             qtm_open_manifold_until(substrate, self.activation);
 
-        let (bitcoininput, retained_mass, depth) =
-            self.bitcoin_payload(
+        let (bitcoin_inputs, retained_mass, depth) =
+            self.bitcoin_inputs(
                 &observed,
                 &pre_settlement.state,
             )?;
@@ -199,9 +200,9 @@ impl BitcoinObservationPipeline {
         })?;
 
         let Some((finalized, payload, retained_mass)) =
-            self.advance_materialized(
+            self.advance_materialize(
                 substrate,
-                bitcoin,
+                bitcoin_inputs,
                 retained_mass,
                 event_receipt,
                 observed,
@@ -220,19 +221,19 @@ impl BitcoinObservationPipeline {
     }
 
     #[inline(always)]
-    pub fn bitcoin_payload(
+    pub fn bitcoin_inputs(
         &mut self,
         observed: &ObservedBitcoinTransaction,
         manifold: &QuantPerm,
-    ) -> Result<(BitcoinInput, u128, Depth), SettlementError> {
+    ) -> Result<(Vec<BitcoinInput>, u128, Depth), SettlementError> {
         self.utxo.collect(observed, manifold)
     }
 
     #[inline(always)]
-    pub fn advance_materialized(
+    pub fn advance_materialize(
         &mut self,
         substrate: &str,
-        bitcoin: BitcoinPayload,
+        bitcoin_inputs: Vec<BitcoinInput>,
         retained_mass: u128,
         event_receipt: EventReceipt,
         observed: ObservedBitcoinTransaction,
@@ -248,7 +249,7 @@ impl BitcoinObservationPipeline {
         let (finalized, payload) =
             SettlementEngine::new(substrate).process(
                 event_receipt,
-                bitcoin,
+                bitcoin_inputs,
                 observed,
                 submission,
             )?;
