@@ -1,7 +1,6 @@
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     error::Error,
-    io::ErrorKind,
     str::FromStr,
 };
 
@@ -18,7 +17,10 @@ use qp_hd::pathsregistry::CoinType;
 use serde_json::Value;
 use tokio::net::TcpStream;
 use tokio_tungstenite::{
-    connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream,
+    connect_async,
+    tungstenite::Message,
+    MaybeTlsStream,
+    WebSocketStream,
 };
 
 use crate::{
@@ -96,6 +98,7 @@ impl MempoolSpaceStream {
         mode: MempoolStreamMode,
     ) -> ObservationResult<Self> {
         let (mut socket, _) = connect_async(MEMPOOL_SPACE_WS).await?;
+
         let subscription = match mode {
             MempoolStreamMode::TransactionIds => {
                 r#"{"track-mempool-txids":true}"#
@@ -105,7 +108,9 @@ impl MempoolSpaceStream {
             }
         };
 
-        socket.send(Message::Text(subscription.into())).await?;
+        socket
+            .send(Message::Text(subscription.into()))
+            .await?;
 
         Ok(Self {
             socket,
@@ -132,7 +137,9 @@ impl MempoolSpaceStream {
         self.skipped
     }
 
-    pub async fn next_observation(&mut self) -> ObservationResult<BitcoinObservation> {
+    pub async fn next_observation(
+        &mut self,
+    ) -> ObservationResult<BitcoinObservation> {
         loop {
             if let Some(observation) = self.pending.pop_front() {
                 return Ok(observation);
@@ -143,21 +150,21 @@ impl MempoolSpaceStream {
     }
 
     pub async fn stream(
-    &mut self,
-    substrate: &str,
-    pipeline: &mut BitcoinObservationPipeline,
-) -> ObservationResult<PipelineOutcome> {
-    let BitcoinObservation::Transaction(transaction) =
-        self.next_observation().await?;
+        &mut self,
+        substrate: &str,
+        pipeline: &mut BitcoinObservationPipeline,
+    ) -> ObservationResult<PipelineOutcome> {
+        let BitcoinObservation::Transaction(transaction) =
+            self.next_observation().await?;
 
-    let observed = ObservedBitcoinTransaction::from_observedtransaction(
-        transaction,
-        self.source,
-    );
+        let observed =
+            ObservedBitcoinTransaction::from_observedtransaction(
+                transaction,
+                self.source,
+            );
 
-    Ok(refresh(pipeline, substrate, observed).await)
-}
-
+        Ok(refresh(pipeline, substrate, observed).await)
+    }
 
     async fn fill(&mut self) -> ObservationResult<()> {
         let message = self
@@ -169,8 +176,12 @@ impl MempoolSpaceStream {
         let value: Value = match message {
             Message::Text(text) => serde_json::from_str(text.as_ref())?,
             Message::Binary(bytes) => serde_json::from_slice(&bytes)?,
-            Message::Close(_) => return Err("Mempool.space WebSocket closed".into()),
-            Message::Ping(_) | Message::Pong(_) | Message::Frame(_) => return Ok(()),
+            Message::Close(_) => {
+                return Err("Mempool.space WebSocket closed".into());
+            }
+            Message::Ping(_) | Message::Pong(_) | Message::Frame(_) => {
+                return Ok(());
+            }
         };
 
         self.decode(&value).await
@@ -186,17 +197,23 @@ impl MempoolSpaceStream {
             }
         };
 
-        for entry in added(value, "mempool-transactions").into_iter().flatten() {
+        for entry in added(value, "mempool-transactions")
+            .into_iter()
+            .flatten()
+        {
             match entry
                 .get("hex")
                 .and_then(Value::as_str)
                 .map(decode_hex_transaction)
             {
                 Some(Ok(tx)) => {
-                    self.pending.push_back(BitcoinObservation::Transaction(tx));
+                    self.pending
+                        .push_back(BitcoinObservation::Transaction(tx));
                     continue;
                 }
-                Some(Err(_)) => self.skipped = self.skipped.saturating_add(1),
+                Some(Err(_)) => {
+                    self.skipped = self.skipped.saturating_add(1);
+                }
                 None => {}
             }
 
@@ -229,8 +246,13 @@ impl MempoolSpaceStream {
             )
             .await
             {
-                Ok(tx) => self.pending.push_back(BitcoinObservation::Transaction(tx)),
-                Err(_) => self.skipped = self.skipped.saturating_add(1),
+                Ok(tx) => {
+                    self.pending
+                        .push_back(BitcoinObservation::Transaction(tx));
+                }
+                Err(_) => {
+                    self.skipped = self.skipped.saturating_add(1);
+                }
             }
         }
 
@@ -275,7 +297,6 @@ fn packet_outpoint(packet: &WirePacket) -> OutPoint {
     OutPoint::new(packet.txid(), packet.vout())
 }
 
-
 /// Validates the clip and budget, processes the observation, resolves
 /// miner-generated and external Bitcoin prevouts, persists and verifies
 /// wire packets, and builds an unsigned PSBT.
@@ -290,7 +311,11 @@ pub async fn refresh(
         .miner
         .clip(substrate)
         .map(|clip| clip.activation)
-        .ok_or_else(|| fail(format!("no active miner clip: substrate={substrate}")))?;
+        .ok_or_else(|| {
+            fail(format!(
+                "no active miner clip: substrate={substrate}"
+            ))
+        })?;
 
     let network = pipeline.network().to_owned();
 
@@ -331,42 +356,47 @@ pub async fn refresh(
             ))
         })?;
 
-    // Index the previously persisted QTM packets.
+    // Index persisted packets from every previous submission.
     let mut parents = ParentIndex::new();
 
-    match load_wirepackets(substrate, activation, &network) {
-        Ok(bytes) => {
-            if persisted == 0 {
-                return Err(fail(format!(
-                    "persisted wire packets exist but submission counter is zero: substrate={substrate} activation={activation} network={network}"
-                )));
-            }
+    for parent_submission in 1..=persisted {
+        let bytes = load_wirepackets(
+            substrate,
+            activation,
+            &network,
+            parent_submission,
+        )
+        .map_err(|e| {
+            fail(format!(
+                "wirepacket load failed: substrate={substrate} activation={activation} network={network} submission={parent_submission}: {e}"
+            ))
+        })?;
 
-            let packets = decode_wirepackets(&bytes)?;
+        let packets = decode_wirepackets(&bytes)?;
 
-            let commitment = packets
-                .first()
-                .ok_or_else(|| fail("persisted wire packets are empty"))?
-                .commitment;
+        let commitment = packets
+            .first()
+            .ok_or_else(|| {
+                fail(format!(
+                    "persisted wire packets are empty: substrate={substrate} activation={activation} network={network} submission={parent_submission}"
+                ))
+            })?
+            .commitment;
 
-            if packets.iter().any(|packet| packet.commitment != commitment) {
-                return Err(fail(
-                    "mixed commitments in persisted wire packets",
-                ));
-            }
-
-            for packet in packets {
-                parents
-                    .entry(packet_outpoint(&packet))
-                    .or_default()
-                    .push((persisted, packet));
-            }
-        }
-        Err(e) if e.kind() == ErrorKind::NotFound => {}
-        Err(e) => {
+        if packets
+            .iter()
+            .any(|packet| packet.commitment != commitment)
+        {
             return Err(fail(format!(
-                "wirepacket load failed: substrate={substrate} activation={activation} network={network}: {e}"
+                "mixed commitments in persisted wire packets: substrate={substrate} activation={activation} network={network} submission={parent_submission}"
             )));
+        }
+
+        for packet in packets {
+            parents
+                .entry(packet_outpoint(&packet))
+                .or_default()
+                .push((parent_submission, packet));
         }
     }
 
@@ -414,7 +444,9 @@ pub async fn refresh(
     let generated = finalized.wire_packets(commitment);
 
     if generated.is_empty() {
-        return Err(fail("finalized settlement produced no wire packets"));
+        return Err(fail(
+            "finalized settlement produced no wire packets",
+        ));
     }
 
     let txid = tx.compute_txid();
@@ -457,7 +489,8 @@ pub async fn refresh(
                 }
 
                 if resolved.output.value.to_sat() != packet.value
-                    || resolved.output.script_pubkey != packet.script_pubkey
+                    || resolved.output.script_pubkey
+                        != packet.script_pubkey
                 {
                     return Err(fail(format!(
                         "resolved QTM prevout output mismatch: input={i} outpoint={outpoint}"
@@ -479,7 +512,9 @@ pub async fn refresh(
 
                 let parent_transaction = fetch_decode(
                     &client,
-                    format!("{MEMPOOL_SPACE_API}/tx/{parent_txid}/raw"),
+                    format!(
+                        "{MEMPOOL_SPACE_API}/tx/{parent_txid}/raw"
+                    ),
                 )
                 .await
                 .map_err(|e| {
@@ -488,7 +523,8 @@ pub async fn refresh(
                     ))
                 })?;
 
-                let actual_parent_txid = parent_transaction.compute_txid();
+                let actual_parent_txid =
+                    parent_transaction.compute_txid();
 
                 if actual_parent_txid != parent_txid {
                     return Err(fail(format!(
@@ -531,7 +567,9 @@ pub async fn refresh(
     // Build the PSBT only after all Bitcoin prevouts have been resolved.
     let psbt = BitcoinPsbt::from_settlement(&finalized, prevouts)
         .map_err(|e| {
-            fail(format!("Bitcoin PSBT preparation failed: {e}"))
+            fail(format!(
+                "Bitcoin PSBT preparation failed: {e}"
+            ))
         })?;
 
     // Serialize the current submission's generated QTM packets.
@@ -541,7 +579,9 @@ pub async fn refresh(
         let body = packet.serialize();
 
         if body.is_empty() {
-            return Err(fail("wire-packet serialization failed"));
+            return Err(fail(
+                "wire-packet serialization failed",
+            ));
         }
 
         let len = u32::try_from(body.len())
@@ -556,6 +596,7 @@ pub async fn refresh(
         substrate,
         activation,
         &network,
+        submission,
         &packet_bytes,
     )
     .map_err(|e| {
@@ -564,14 +605,18 @@ pub async fn refresh(
         ))
     })?;
 
-    // Reload and verify persisted packets.
-    let persisted_bytes =
-        load_wirepackets(substrate, activation, &network)
-            .map_err(|e| {
-                fail(format!(
-                    "wire-packet reload failed: substrate={substrate} activation={activation} network={network} submission={submission}: {e}"
-                ))
-            })?;
+    // Reload and verify the exact persisted submission.
+    let persisted_bytes = load_wirepackets(
+        substrate,
+        activation,
+        &network,
+        submission,
+    )
+    .map_err(|e| {
+        fail(format!(
+            "wire-packet reload failed: substrate={substrate} activation={activation} network={network} submission={submission}: {e}"
+        ))
+    })?;
 
     let wire_packets = decode_wirepackets(&persisted_bytes)?;
 
@@ -583,8 +628,8 @@ pub async fn refresh(
         ));
     }
 
-    // Commit the submission counter only after PSBT preparation,
-    // packet persistence, and packet verification have succeeded.
+    // Commit only after PSBT preparation, packet persistence,
+    // and packet verification have succeeded.
     pipeline
         .miner
         .submissions
@@ -607,24 +652,37 @@ pub async fn refresh(
         pipeline.miner().broadcaster.publish(packet);
     }
 
-    Ok(Some((finalized, psbt, retained_mass, commitment)))
+    Ok(Some((
+        finalized,
+        psbt,
+        retained_mass,
+        commitment,
+    )))
 }
 
-pub fn decode_wirepackets(bytes: &[u8]) -> Result<Vec<WirePacket>, SettlementError> {
+pub fn decode_wirepackets(
+    bytes: &[u8],
+) -> Result<Vec<WirePacket>, SettlementError> {
     let mut rest = bytes;
     let mut packets = Vec::new();
 
     while !rest.is_empty() {
         let (head, tail) = rest
             .split_at_checked(4)
-            .ok_or_else(|| fail("truncated wire-packet frame header"))?;
+            .ok_or_else(|| {
+                fail("truncated wire-packet frame header")
+            })?;
 
         let len = u32::from_be_bytes(
             head.try_into()
-                .map_err(|_| fail("invalid wire-packet frame header"))?,
+                .map_err(|_| {
+                    fail("invalid wire-packet frame header")
+                })?,
         ) as usize;
 
-        if !(WirePacket::MIN_SIZE..=WirePacket::MAX_SIZE).contains(&len) {
+        if !(WirePacket::MIN_SIZE..=WirePacket::MAX_SIZE)
+            .contains(&len)
+        {
             return Err(fail(format!(
                 "invalid wire-packet frame length={len}"
             )));
@@ -632,18 +690,26 @@ pub fn decode_wirepackets(bytes: &[u8]) -> Result<Vec<WirePacket>, SettlementErr
 
         let (frame, tail) = tail
             .split_at_checked(len)
-            .ok_or_else(|| fail("truncated wire-packet frame payload"))?;
+            .ok_or_else(|| {
+                fail("truncated wire-packet frame payload")
+            })?;
 
         packets.push(
             WirePacket::deserialize(frame)
-                .map_err(|e| fail(format!("wire-packet deserialization failed: {e}")))?,
+                .map_err(|e| {
+                    fail(format!(
+                        "wire-packet deserialization failed: {e}"
+                    ))
+                })?,
         );
 
         rest = tail;
     }
 
     if packets.is_empty() {
-        return Err(fail("persisted wire-packet file is empty"));
+        return Err(fail(
+            "persisted wire-packet file is empty",
+        ));
     }
 
     Ok(packets)
