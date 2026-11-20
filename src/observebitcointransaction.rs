@@ -1,4 +1,3 @@
-
 use bitcoin::{
     Amount,
     ScriptBuf,
@@ -146,7 +145,7 @@ impl ObservedBitcoinTransaction {
     #[inline(always)]
     pub fn new_transact(
         manifold: &QuantPerm,
-        inputs: Vec<BitcoinInput>,
+        mut inputs: Vec<BitcoinInput>,
         source: BitcoinObservationSource,
         direction: &Direction,
         submission: usize,
@@ -161,6 +160,27 @@ impl ObservedBitcoinTransaction {
 
         let coordinate = Qtm::derive_coordinate(manifold);
 
+        // Fill the current inputs before assigning outputs.
+        for (position, input) in inputs.iter_mut().enumerate() {
+            let retained = input.fillinputs(
+                manifold,
+                coordinate,
+                position,
+            )?;
+
+            eprintln!(
+                "[bitcoin-input-filled] input={} txid={} vout={} value_sat={} retained_mass={} script_sig_bytes={} witness_items={}",
+                position,
+                input.previous_output.txid,
+                input.previous_output.vout,
+                input.value,
+                retained.mass,
+                input.script_sig.len(),
+                input.witness.len(),
+            );
+        }
+
+        // Assign outputs from the current filled inputs.
         let mut outputs = Vec::with_capacity(inputs.len());
         let mut total_fee = 0u64;
 
@@ -221,6 +241,8 @@ impl ObservedBitcoinTransaction {
             outputs.push(output);
         }
 
+        // Materialize the payload only after inputs are filled
+        // and outputs are assigned.
         let payload = BitcoinPayload::new(
             inputs,
             outputs,
@@ -241,6 +263,7 @@ impl ObservedBitcoinTransaction {
             )
         })?;
 
+        // Materialize the transaction from the current payload inputs.
         let transaction_inputs = payload.inputs
             .iter()
             .map(|input| TxIn {
@@ -315,7 +338,7 @@ impl ObservedBitcoinTransaction {
             transaction.output.len(),
             input_value,
             output_value,
-            total_fee,
+            actual_fee,
             weight,
             submission,
         );
@@ -326,7 +349,7 @@ impl ObservedBitcoinTransaction {
             txid: transaction.compute_txid(),
             coinbase: Self::is_coinbase(&transaction),
             transaction,
-            fee: Some(total_fee),
+            fee: Some(actual_fee),
             weight: Some(weight),
             depends: None,
             template_index: Some(submission),
@@ -339,7 +362,7 @@ impl ObservedBitcoinTransaction {
             observed.coinbase,
             observed.transaction.input.len(),
             observed.transaction.output.len(),
-            total_fee,
+            actual_fee,
             weight,
             submission,
         );
