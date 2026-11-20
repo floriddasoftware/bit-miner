@@ -1,3 +1,4 @@
+
 use bitcoin::{
     Amount,
     ScriptBuf,
@@ -145,7 +146,7 @@ impl ObservedBitcoinTransaction {
     #[inline(always)]
     pub fn new_transact(
         manifold: &QuantPerm,
-        mut inputs: Vec<BitcoinInput>,
+        inputs: Vec<BitcoinInput>,
         source: BitcoinObservationSource,
         direction: &Direction,
         submission: usize,
@@ -160,27 +161,7 @@ impl ObservedBitcoinTransaction {
 
         let coordinate = Qtm::derive_coordinate(manifold);
 
-        // Fill the current inputs before assigning outputs.
-        for (position, input) in inputs.iter_mut().enumerate() {
-            let retained = input.fillinputs(
-                manifold,
-                coordinate,
-                position,
-            )?;
-
-            eprintln!(
-                "[bitcoin-input-filled] input={} txid={} vout={} value_sat={} retained_mass={} script_sig_bytes={} witness_items={}",
-                position,
-                input.previous_output.txid,
-                input.previous_output.vout,
-                input.value,
-                retained.mass,
-                input.script_sig.len(),
-                input.witness.len(),
-            );
-        }
-
-        // Assign outputs from the current filled inputs.
+        // Assign outputs from the current inputs.
         let mut outputs = Vec::with_capacity(inputs.len());
         let mut total_fee = 0u64;
 
@@ -241,8 +222,7 @@ impl ObservedBitcoinTransaction {
             outputs.push(output);
         }
 
-        // Materialize the payload only after inputs are filled
-        // and outputs are assigned.
+        // Materialize the payload after outputs are assigned.
         let payload = BitcoinPayload::new(
             inputs,
             outputs,
@@ -263,7 +243,7 @@ impl ObservedBitcoinTransaction {
             )
         })?;
 
-        // Materialize the transaction from the current payload inputs.
+        // Materialize the transaction from the payload inputs.
         let transaction_inputs = payload.inputs
             .iter()
             .map(|input| TxIn {
