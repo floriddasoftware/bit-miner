@@ -213,9 +213,9 @@ impl BitcoinInput {
         let input = Self {
             previous_output,
             value,
-            script_sig,
+        script_sig,
             witness,
-            sequence,
+        sequence,
         };
 
         let retained = input.deep(manifold, 0);
@@ -223,41 +223,7 @@ impl BitcoinInput {
         (retained, input)
     }
 
-    /// Populate the unsigned native SegWit P2WPKH input template.
-    ///
-    /// Filling does not sign the transaction. It prepares the input's
-    /// script_sig and witness fields and returns its retained depth.
-    #[inline]
-    pub fn fillinputs(
-        &mut self,
-        manifold: &QuantPerm,
-        coordinate: [u8; 32],
-        input_index: usize,
-    ) -> Result<Retain, SigningError> {
-        let (public_key, _) =
-            crate::bit_block::derive_public_key(coordinate)
-                .map_err(|error| {
-                    SigningError::InvalidPrivateKey(
-                        error.to_string(),
-                    )
-                })?;
-
-        let public_key_bytes = public_key.to_bytes();
-
-        self.script_sig = ScriptBuf::new();
-
-        self.witness = Witness::from_slice(&[
-            &[],
-            public_key_bytes.as_slice(),
-        ]);
-
-        Ok(self.deep(manifold, input_index))
-    }
-
-    /// Sign a populated P2WPKH input.
-    ///
-    /// This operation replaces the unsigned witness template with
-    /// the actual DER signature and compressed public key.
+    /// Fill and sign a native SegWit P2WPKH input.
     #[inline]
     pub fn sign(
         &mut self,
@@ -303,6 +269,11 @@ impl BitcoinInput {
 
         let public_key = PublicKey::new(secp_public_key);
         let public_key_bytes = public_key.to_bytes();
+
+        self.script_sig = ScriptBuf::new();
+        self.witness = Witness::new();
+
+        let retained = self.deep(manifold, input_index);
 
         let pubkey_hash =
             bitcoin::WPubkeyHash::hash(&public_key_bytes);
@@ -354,7 +325,7 @@ impl BitcoinInput {
             public_key_bytes.as_slice(),
         ]);
 
-        Ok(self.deep(manifold, input_index))
+        Ok(retained)
     }
 }
 
