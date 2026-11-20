@@ -1,3 +1,4 @@
+
 use std::{
     error::Error,
     fmt,
@@ -70,7 +71,11 @@ impl fmt::Display for SigningError {
                 index,
             ),
             Self::InvalidPrivateKey(error) => {
-                write!(f, "invalid Bitcoin private key: {}", error)
+                write!(
+                    f,
+                    "invalid Bitcoin private key: {}",
+                    error,
+                )
             }
             Self::PreviousOutputScriptMismatch { index } => write!(
                 f,
@@ -78,10 +83,18 @@ impl fmt::Display for SigningError {
                 index,
             ),
             Self::Sighash(error) => {
-                write!(f, "Bitcoin signature hash failed: {}", error)
+                write!(
+                    f,
+                    "Bitcoin signature hash failed: {}",
+                    error,
+                )
             }
             Self::InvalidMessage(error) => {
-                write!(f, "invalid Bitcoin signing message: {}", error)
+                write!(
+                    f,
+                    "invalid Bitcoin signing message: {}",
+                    error,
+                )
             }
         }
     }
@@ -120,9 +133,9 @@ impl BitcoinInput {
                 .as_raw_hash()
                 .as_byte_array(),
         )
-        .saturating_add(u128::from(
-            self.previous_output.vout,
-        ))
+        .saturating_add(
+            u128::from(self.previous_output.vout),
+        )
     }
 
     #[inline(always)]
@@ -210,6 +223,41 @@ impl BitcoinInput {
         (retained, input)
     }
 
+    /// Populate the unsigned native SegWit P2WPKH input template.
+    ///
+    /// Filling does not sign the transaction. It prepares the input's
+    /// script_sig and witness fields and returns its retained depth.
+    #[inline]
+    pub fn fillinputs(
+        &mut self,
+        manifold: &QuantPerm,
+        coordinate: [u8; 32],
+        input_index: usize,
+    ) -> Result<Retain, SigningError> {
+        let (public_key, _) =
+            crate::bit_block::derive_public_key(coordinate)
+                .map_err(|error| {
+                    SigningError::InvalidPrivateKey(
+                        error.to_string(),
+                    )
+                })?;
+
+        let public_key_bytes = public_key.to_bytes();
+
+        self.script_sig = ScriptBuf::new();
+
+        self.witness = Witness::from_slice(&[
+            &[],
+            public_key_bytes.as_slice(),
+        ]);
+
+        Ok(self.deep(manifold, input_index))
+    }
+
+    /// Sign a populated P2WPKH input.
+    ///
+    /// This operation replaces the unsigned witness template with
+    /// the actual DER signature and compressed public key.
     #[inline]
     pub fn sign(
         &mut self,
@@ -278,7 +326,9 @@ impl BitcoinInput {
                 EcdsaSighashType::All,
             )
             .map_err(|error| {
-                SigningError::Sighash(error.to_string())
+                SigningError::Sighash(
+                    error.to_string(),
+                )
             })?;
 
         let message =
@@ -295,7 +345,9 @@ impl BitcoinInput {
         let mut signature_bytes =
             signature.serialize_der().to_vec();
 
-        signature_bytes.push(EcdsaSighashType::All as u8);
+        signature_bytes.push(
+            EcdsaSighashType::All as u8,
+        );
 
         self.witness = Witness::from_slice(&[
             signature_bytes.as_slice(),
