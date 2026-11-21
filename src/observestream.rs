@@ -297,11 +297,11 @@ fn packet_outpoint(packet: &WirePacket) -> OutPoint {
     OutPoint::new(packet.txid(), packet.vout())
 }
 
+
 /// Validates the clip and budget, processes the observation, resolves
 /// miner-generated and external Bitcoin prevouts, persists and verifies
-/// wire packets, and builds an unsigned PSBT.
-///
-/// The wallet client owns signing and broadcast.
+/// wire packets, signs the PSBT, and broadcasts the signed Bitcoin
+/// transaction and QTM packets.
 pub async fn refresh(
     pipeline: &mut BitcoinObservationPipeline,
     substrate: &str,
@@ -565,7 +565,7 @@ pub async fn refresh(
     }
 
     // Build the PSBT only after all Bitcoin prevouts have been resolved.
-    let psbt = BitcoinPsbt::from_settlement(&finalized, prevouts)
+    let mut psbt = BitcoinPsbt::from_settlement(&finalized, prevouts)
         .map_err(|e| {
             fail(format!(
                 "Bitcoin PSBT preparation failed: {e}"
@@ -628,13 +628,6 @@ pub async fn refresh(
         ));
     }
 
-    // Commit only after PSBT preparation, packet persistence,
-    // and packet verification have succeeded.
-    pipeline
-        .miner
-        .submissions
-        .insert(substrate.to_owned(), submission);
-
     println!(
         "qtm_wirepackets=persisted substrate={substrate} activation={activation} network={network} submission={submission} commitment={} packets={} bytes={}",
         hex::encode(commitment),
@@ -647,18 +640,140 @@ pub async fn refresh(
         psbt.unsigned_txid(),
     );
 
-    // Broadcast only after persistence and verification.
+    // Sign the PSBT using the finalized settlement receipt.
+    let settlementreceipt = finalized
+        .receipt
+        .as_ref()
+        .ok_or_else(|| {
+            fail("finalized settlement has no receipt")
+        })?;
+
+    let coordinate = settlementreceipt.event.qtm.coordinate;
+    let manifold = &settlementreceipt.event.heritage.state;
+
+    let unsigned_transaction = &psbt.psbt.unsigned_tx;
+    let mut signed_transaction = unsigned_transaction.clone();
+
+    // Sign each materialized input against its resolved previous output.
+    for (index, payload_input) in payload.inputs.iter_mut().enumerate() {
+        let transaction_input = unsigned_transaction
+            .input
+            .get(index)
+            .ok_or_else(|| {
+                fail(format!(
+                    "PSBT transaction input missing: index={index}"
+                ))
+            })?;
+
+        let outpoint = transaction_input.previous_output;
+
+        let psbt_input = psbt
+            .psbt
+            .inputs
+            .get(index)
+            .ok_or_else(|| {
+                fail(format!(
+                    "PSBT input metadata missing: index={index}"
+                ))
+            })?;
+
+        let previous_output = psbt_input
+            .witness_utxo
+            .as_ref()
+            .ok_or_else(|| {
+                fail(format!(
+                    "PSBT witness UTXO missing: input={index} outpoint={outpoint}"
+                ))
+            })?;
+
+        let value = previous_output.value.to_sat();
+
+        if payload_input.previous_output != outpoint {
+            return Err(fail(format!(
+                "Bitcoin input outpoint mismatch: input={index} PSBT={outpoint} payload={}",
+                payload_input.previous_output,
+            )));
+        }
+
+        if payload_input.value != value {
+            return Err(fail(format!(
+                "Bitcoin input value mismatch: input={index} PSBT={value} payload={}",
+                payload_input.value,
+            )));
+        }
+
+        payload_input
+            .sign(
+                manifold,
+                coordinate,
+                unsigned_transaction,
+                index,
+                value,
+                &previous_output.script_pubkey,
+            )
+            .map_err(|e| {
+                fail(format!(
+                    "Bitcoin input signing failed: input={index} outpoint={outpoint}: {e}"
+                ))
+            })?;
+
+        // Apply the signature witness to the transaction.
+        signed_transaction.input[index].script_sig =
+            payload_input.script_sig.clone();
+
+        signed_transaction.input[index].witness =
+            payload_input.witness.clone();
+
+        // Finalize the PSBT input internally.
+        psbt.psbt.inputs[index].final_script_sig =
+            Some(payload_input.script_sig.clone());
+
+        psbt.psbt.inputs[index].final_script_witness =
+            Some(payload_input.witness.clone());
+
+        println!(
+            "bitcoin_input=signed index={index} outpoint={outpoint} value_sat={value} witness_items={}",
+            payload_input.witness.len(),
+        );
+    }
+
+    // Submit the fully signed Bitcoin transaction to Electrum.
+    let broadcast_txid = pipeline
+        .electrum
+        .submit(signed_transaction.clone())
+        .map_err(|e| {
+            fail(format!(
+                "Electrum broadcast submission failed: {e}"
+            ))
+        })?;
+
+    println!(
+        "bitcoin_broadcast=submitted submission={submission} txid={broadcast_txid}",
+    );
+
+    // Commit the submission after signing and Electrum enqueue succeed.
+    pipeline
+        .miner
+        .submissions
+        .insert(substrate.to_owned(), submission);
+
+    println!(
+        "bitcoin_psbt=signed submission={submission} txid={broadcast_txid}",
+    );
+
+    // Broadcast QTM packets after Bitcoin submission.
     for packet in wire_packets {
         pipeline.miner().broadcaster.publish(packet);
     }
 
     Ok(Some((
         finalized,
-        psbt,
+        signed_transaction,
         retained_mass,
         commitment,
     )))
 }
+
 
 pub fn decode_wirepackets(
     bytes: &[u8],
