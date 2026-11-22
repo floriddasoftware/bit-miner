@@ -767,11 +767,11 @@ pub async fn refresh(
     }
 
     Ok(Some((
-        finalized,
-        signed_transaction,
-        retained_mass,
-        commitment,
-    )))
+    finalized,
+    psbt,
+    retained_mass,
+    commitment,
+)))
 }
 
 
