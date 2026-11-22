@@ -400,7 +400,7 @@ pub async fn refresh(
         }
     }
 
-    let Some((finalized, payload, retained_mass, commitment)) =
+    let Some((finalized, mut payload, retained_mass, commitment)) =
         pipeline.process(substrate, observed)?
     else {
         return Ok(None);
